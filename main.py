@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from twilio.rest import Client
 import os
 import json
+import time
 
 app = FastAPI()
 
@@ -32,11 +33,14 @@ CLIENTS = {
     }
 }
 
+# -------------------------------------------------
+# DEDUP STORE (call_id + event safety)
+# -------------------------------------------------
+PROCESSED_KEYS = set()
+PROCESSED_TTL = 60 * 10  # 10 min cleanup window
 
-# -------------------------------------------------
-# DEDUPLICATION STORE (PREVENT SMS DUPLICATES)
-# -------------------------------------------------
-PROCESSED_CALLS = set()
+# simple in-memory timestamp store
+PROCESSED_META = {}
 
 
 # -------------------------------------------------
@@ -48,7 +52,7 @@ def root():
 
 
 # -------------------------------------------------
-# CORE WEBHOOK (Retell ingestion)
+# CORE WEBHOOK
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
 async def call_summary(request: Request):
@@ -56,35 +60,50 @@ async def call_summary(request: Request):
     try:
         data = await request.json()
 
-        # -------------------------------------------------
-        # RAW DEBUG
-        # -------------------------------------------------
         print("🔥 RAW PAYLOAD RECEIVED")
-        print("🔥 RAW WEBHOOK PAYLOAD:\n", json.dumps(data, indent=2))
+        print(json.dumps(data, indent=2))
 
-        # Event detection
         event_type = data.get("event") or data.get("type") or "unknown"
         print("📡 EVENT TYPE:", event_type)
 
         # -------------------------------------------------
-        # CALL ID + DEDUPLICATION (NEW FIX)
+        # ONLY PROCESS FINAL CALL EVENT (CRITICAL FIX)
+        # -------------------------------------------------
+        FINAL_EVENTS = {"call_analyzed", "call_ended", "call_summary"}
+
+        if event_type not in FINAL_EVENTS:
+            print("⏭ Ignoring non-final event:", event_type)
+            return {"status": "ignored_event", "event": event_type}
+
+        # -------------------------------------------------
+        # CALL ID + DEDUP (event + call_id combo)
         # -------------------------------------------------
         call_id = (
             data.get("call", {}).get("call_id")
             or data.get("call_id")
         )
 
-        print("🧷 CALL ID:", call_id)
+        dedup_key = f"{call_id}:{event_type}"
 
-        if call_id and call_id in PROCESSED_CALLS:
-            print("⚠️ Duplicate call ignored:", call_id)
+        now = time.time()
+
+        # cleanup old entries
+        for k in list(PROCESSED_META.keys()):
+            if now - PROCESSED_META[k] > PROCESSED_TTL:
+                PROCESSED_META.pop(k, None)
+                PROCESSED_KEYS.discard(k)
+
+        if dedup_key in PROCESSED_KEYS:
+            print("⚠️ Duplicate webhook ignored:", dedup_key)
             return {"status": "duplicate_ignored"}
 
-        if call_id:
-            PROCESSED_CALLS.add(call_id)
+        PROCESSED_KEYS.add(dedup_key)
+        PROCESSED_META[dedup_key] = now
+
+        print("🧷 CALL KEY:", dedup_key)
 
         # -------------------------------------------------
-        # TRANSCRIPT EXTRACTION (USER INTENT)
+        # TRANSCRIPT EXTRACTION (ROBUST)
         # -------------------------------------------------
         messages = (
             data.get("transcript_object")
@@ -92,12 +111,12 @@ async def call_summary(request: Request):
             or []
         )
 
-        user_text = ""
-        for m in messages:
-            if isinstance(m, dict) and m.get("role") == "user":
-                user_text += " " + (m.get("content") or "")
+        user_text = " ".join(
+            m.get("content", "")
+            for m in messages
+            if isinstance(m, dict) and m.get("role") == "user"
+        ).strip()
 
-        user_text = user_text.strip()
         print("🧠 USER TEXT:", user_text)
 
         # -------------------------------------------------
@@ -110,21 +129,27 @@ async def call_summary(request: Request):
             or "hvac_toronto_001"
         )
 
-        print("🧾 CLIENT ID RESOLVED:", client_id)
+        print("🧾 CLIENT ID:", client_id)
 
         # -------------------------------------------------
         # CALLER INFO
         # -------------------------------------------------
+        call_obj = data.get("call", {}) or {}
+
         caller_name = data.get("caller_name") or "Unknown"
-        caller_phone = data.get("caller_phone")
+        caller_phone = (
+            data.get("caller_phone")
+            or call_obj.get("from_number")
+        )
 
-        summary = data.get("summary") or data.get("call_summary") or user_text
+        summary = (
+            data.get("summary")
+            or data.get("call_summary")
+            or call_obj.get("summary")
+            or user_text
+        )
+
         urgency = data.get("urgency") or "normal"
-
-        call_obj = data.get("call")
-        if isinstance(call_obj, dict):
-            caller_phone = caller_phone or call_obj.get("from_number")
-            summary = summary or call_obj.get("summary") or user_text
 
         # -------------------------------------------------
         # VALIDATION
@@ -138,15 +163,16 @@ async def call_summary(request: Request):
         print(f"[GOSONIC] client={client_id} caller={caller_name}")
 
         # -------------------------------------------------
-        # BUSINESS SMS
+        # BUSINESS MESSAGE (clean formatting)
         # -------------------------------------------------
         business_message = (
-            "📞 Gosonic Call Alert\n\n"
+            "📞 Gosonic Call Alert\n"
+            "----------------------\n"
             f"Business: {client['business_name']}\n"
             f"Caller: {caller_name}\n"
-            f"Phone: {caller_phone}\n"
-            f"Summary: {summary}\n"
-            f"Urgency: {urgency}"
+            f"Phone: {caller_phone or 'Unknown'}\n"
+            f"Urgency: {urgency}\n\n"
+            f"Summary:\n{summary}"
         )
 
         business_sent = False
@@ -166,9 +192,8 @@ async def call_summary(request: Request):
         else:
             print("[TWILIO] Business SMS skipped")
 
-
         # -------------------------------------------------
-        # CALLER SMS
+        # CALLER SMS (only if valid phone)
         # -------------------------------------------------
         caller_sent = False
 
@@ -193,7 +218,6 @@ async def call_summary(request: Request):
             else:
                 print("[TWILIO] Caller SMS skipped")
 
-
         # -------------------------------------------------
         # RESPONSE
         # -------------------------------------------------
@@ -210,7 +234,4 @@ async def call_summary(request: Request):
 
     except Exception as e:
         print("[WEBHOOK ERROR]", str(e))
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
