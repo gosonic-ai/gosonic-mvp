@@ -34,6 +34,12 @@ CLIENTS = {
 
 
 # -------------------------------------------------
+# DEDUPLICATION STORE (PREVENT SMS DUPLICATES)
+# -------------------------------------------------
+PROCESSED_CALLS = set()
+
+
+# -------------------------------------------------
 # HEALTH CHECK
 # -------------------------------------------------
 @app.get("/")
@@ -61,6 +67,23 @@ async def call_summary(request: Request):
         print("📡 EVENT TYPE:", event_type)
 
         # -------------------------------------------------
+        # CALL ID + DEDUPLICATION (NEW FIX)
+        # -------------------------------------------------
+        call_id = (
+            data.get("call", {}).get("call_id")
+            or data.get("call_id")
+        )
+
+        print("🧷 CALL ID:", call_id)
+
+        if call_id and call_id in PROCESSED_CALLS:
+            print("⚠️ Duplicate call ignored:", call_id)
+            return {"status": "duplicate_ignored"}
+
+        if call_id:
+            PROCESSED_CALLS.add(call_id)
+
+        # -------------------------------------------------
         # TRANSCRIPT EXTRACTION (USER INTENT)
         # -------------------------------------------------
         messages = (
@@ -78,13 +101,13 @@ async def call_summary(request: Request):
         print("🧠 USER TEXT:", user_text)
 
         # -------------------------------------------------
-        # CLIENT ID RESOLUTION (FIXED CORE ISSUE)
+        # CLIENT ID RESOLUTION
         # -------------------------------------------------
         client_id = (
             data.get("client_id")
             or data.get("call", {}).get("metadata", {}).get("client_id")
             or data.get("call", {}).get("client")
-            or "hvac_toronto_001"   # TEMP SAFE FALLBACK FOR TESTING
+            or "hvac_toronto_001"
         )
 
         print("🧾 CLIENT ID RESOLVED:", client_id)
@@ -98,7 +121,6 @@ async def call_summary(request: Request):
         summary = data.get("summary") or data.get("call_summary") or user_text
         urgency = data.get("urgency") or "normal"
 
-        # Nested fallback (Retell call object)
         call_obj = data.get("call")
         if isinstance(call_obj, dict):
             caller_phone = caller_phone or call_obj.get("from_number")
@@ -142,7 +164,7 @@ async def call_summary(request: Request):
             except Exception as e:
                 print("[TWILIO BUSINESS ERROR]", str(e))
         else:
-            print("[TWILIO] Business SMS skipped (not configured)")
+            print("[TWILIO] Business SMS skipped")
 
 
         # -------------------------------------------------
@@ -169,7 +191,7 @@ async def call_summary(request: Request):
                 except Exception as e:
                     print("[TWILIO CALLER ERROR]", str(e))
             else:
-                print("[TWILIO] Caller SMS skipped (not configured)")
+                print("[TWILIO] Caller SMS skipped")
 
 
         # -------------------------------------------------
@@ -178,6 +200,7 @@ async def call_summary(request: Request):
         return {
             "status": "processed",
             "event_type": event_type,
+            "call_id": call_id,
             "client_id": client_id,
             "business": client["business_name"],
             "user_text": user_text,
