@@ -1,35 +1,33 @@
 from fastapi import FastAPI, Request
 from twilio.rest import Client
 import os
+import json
 
 app = FastAPI()
 
 # -------------------------------------------------
-# TWILIO SETUP (SAFE INITIALIZATION)
+# ENV / TWILIO SETUP
 # -------------------------------------------------
-twilio_client = None
-
+TWILIO_SID = os.getenv("TWILIO_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE = os.getenv("TWILIO_PHONE")
 
-if os.getenv("TWILIO_SID") and os.getenv("TWILIO_AUTH_TOKEN"):
-    twilio_client = Client(
-        os.getenv("TWILIO_SID"),
-        os.getenv("TWILIO_AUTH_TOKEN")
-    )
+twilio_client = None
+
+if TWILIO_SID and TWILIO_AUTH_TOKEN:
+    twilio_client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
+    print("✅ Twilio client initialized")
+else:
+    print("⚠️ Twilio not configured (missing env vars)")
 
 
 # -------------------------------------------------
-# SIMPLE CLIENT MAP (v1 multi-tenant layer)
+# CLIENT MAP
 # -------------------------------------------------
 CLIENTS = {
     "hvac_toronto_001": {
         "business_name": "Toronto HVAC",
         "business_phone": "+14383896310",
-        "caller_enabled": True
-    },
-    "plumbing_001": {
-        "business_name": "Best Plumbing",
-        "business_phone": "+14160000002",
         "caller_enabled": True
     }
 }
@@ -44,18 +42,41 @@ def root():
 
 
 # -------------------------------------------------
-# CORE WEBHOOK (Retell-style event ingestion)
+# CORE WEBHOOK (Retell ingestion)
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
 async def call_summary(request: Request):
+
     try:
         data = await request.json()
 
-        # -------------------------
-        # VALIDATION
-        # -------------------------
+        # 🔥 RAW DEBUG (CRITICAL FOR NOW)
+        print("🔥 RAW WEBHOOK PAYLOAD:\n", json.dumps(data, indent=2))
+
+        # Optional: event type detection (Retell sends multiple event types)
+        event_type = data.get("event") or data.get("type") or "unknown"
+        print(f"📡 EVENT TYPE: {event_type}")
+
+        # -------------------------------------------------
+        # SAFE FIELD EXTRACTION (fallback-aware)
+        # -------------------------------------------------
         client_id = data.get("client_id")
 
+        caller_name = data.get("caller_name") or "Unknown"
+        caller_phone = data.get("caller_phone")
+
+        summary = data.get("summary") or data.get("call_summary") or ""
+        urgency = data.get("urgency") or "normal"
+
+        # If nested structure exists (common in Retell)
+        if isinstance(data.get("call"), dict):
+            call_data = data["call"]
+            caller_phone = caller_phone or call_data.get("from_number")
+            summary = summary or call_data.get("summary") or ""
+        
+        # -------------------------------------------------
+        # VALIDATION
+        # -------------------------------------------------
         if not client_id:
             return {"status": "error", "message": "client_id required"}
 
@@ -64,69 +85,75 @@ async def call_summary(request: Request):
         if not client:
             return {"status": "error", "message": "invalid client_id"}
 
-        caller_name = data.get("caller_name", "Unknown")
-        caller_phone = data.get("caller_phone")
-        summary = data.get("summary", "")
-        urgency = data.get("urgency", "normal")
-
         print(f"[GOSONIC] client={client_id} caller={caller_name}")
 
-        # -------------------------
+        # -------------------------------------------------
         # BUSINESS MESSAGE
-        # -------------------------
-        business_message = f"""
-📞 Gosonic Call Alert
+        # -------------------------------------------------
+        business_message = (
+            "📞 Gosonic Call Alert\n\n"
+            f"Business: {client['business_name']}\n"
+            f"Caller: {caller_name}\n"
+            f"Phone: {caller_phone}\n"
+            f"Summary: {summary}\n"
+            f"Urgency: {urgency}"
+        )
 
-Business: {client['business_name']}
-Caller: {caller_name}
-Phone: {caller_phone}
-Summary: {summary}
-Urgency: {urgency}
-"""
+        business_sent = False
 
-        # Send to business
-        if twilio_client:
-            twilio_client.messages.create(
-                body=business_message,
-                from_=TWILIO_PHONE,
-                to=client["business_phone"]
-            )
+        if twilio_client and TWILIO_PHONE:
+            try:
+                twilio_client.messages.create(
+                    body=business_message,
+                    from_=TWILIO_PHONE,
+                    to=client["business_phone"]
+                )
+                business_sent = True
+            except Exception as e:
+                print("[TWILIO BUSINESS ERROR]", str(e))
         else:
             print("[TWILIO] Business SMS skipped (not configured)")
 
-        # -------------------------
-        # CALLER CONFIRMATION MESSAGE
-        # -------------------------
+
+        # -------------------------------------------------
+        # CALLER CONFIRMATION
+        # -------------------------------------------------
         caller_sent = False
 
-        if caller_phone and client["caller_enabled"]:
-            caller_message = f"""
-Hi {caller_name}, we’ve received your request.
-{client['business_name']} will contact you shortly.
-"""
+        if caller_phone and client.get("caller_enabled"):
+            caller_message = (
+                f"Hi {caller_name}, we’ve received your request.\n"
+                f"{client['business_name']} will contact you shortly."
+            )
 
-            if twilio_client:
-                twilio_client.messages.create(
-                    body=caller_message,
-                    from_=TWILIO_PHONE,
-                    to=caller_phone
-                )
-                caller_sent = True
+            if twilio_client and TWILIO_PHONE:
+                try:
+                    twilio_client.messages.create(
+                        body=caller_message,
+                        from_=TWILIO_PHONE,
+                        to=caller_phone
+                    )
+                    caller_sent = True
+                except Exception as e:
+                    print("[TWILIO CALLER ERROR]", str(e))
             else:
                 print("[TWILIO] Caller SMS skipped (not configured)")
 
-        # -------------------------
+
+        # -------------------------------------------------
         # RESPONSE
-        # -------------------------
+        # -------------------------------------------------
         return {
             "status": "processed",
+            "event_type": event_type,
             "client_id": client_id,
             "business": client["business_name"],
-            "business_notified": True,
+            "business_notified": business_sent,
             "caller_notified": caller_sent
         }
 
     except Exception as e:
+        print("[WEBHOOK ERROR]", str(e))
         return {
             "status": "error",
             "message": str(e)
