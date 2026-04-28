@@ -50,30 +50,44 @@ async def call_summary(request: Request):
     try:
         data = await request.json()
 
-        # 🔥 RAW DEBUG (CRITICAL FOR NOW)
+        # 🔥 RAW DEBUG (CRITICAL)
+        print("🔥 RAW PAYLOAD RECEIVED")
         print("🔥 RAW WEBHOOK PAYLOAD:\n", json.dumps(data, indent=2))
 
-        # Optional: event type detection (Retell sends multiple event types)
+        # Event detection (:contentReference[oaicite:0]{index=0})
         event_type = data.get("event") or data.get("type") or "unknown"
-        print(f"📡 EVENT TYPE: {event_type}")
+        print("📡 EVENT TYPE:", event_type)
 
         # -------------------------------------------------
-        # SAFE FIELD EXTRACTION (fallback-aware)
+        # EXTRACT TRANSCRIPT MESSAGES (NEW CORE LOGIC)
+        # -------------------------------------------------
+        messages = data.get("messages") or data.get("call", {}).get("messages", [])
+
+        user_text = ""
+        for m in messages:
+            if m.get("role") == "user":
+                user_text += " " + (m.get("content") or "")
+
+        user_text = user_text.strip()
+        print("🧠 USER TEXT:", user_text)
+
+        # -------------------------------------------------
+        # LEGACY / FALLBACK FIELDS (still supported)
         # -------------------------------------------------
         client_id = data.get("client_id")
 
         caller_name = data.get("caller_name") or "Unknown"
         caller_phone = data.get("caller_phone")
 
-        summary = data.get("summary") or data.get("call_summary") or ""
+        summary = data.get("summary") or data.get("call_summary") or user_text
         urgency = data.get("urgency") or "normal"
 
-        # If nested structure exists (common in Retell)
+        # Nested fallback (some Retell payloads)
         if isinstance(data.get("call"), dict):
             call_data = data["call"]
             caller_phone = caller_phone or call_data.get("from_number")
-            summary = summary or call_data.get("summary") or ""
-        
+            summary = summary or call_data.get("summary") or user_text
+
         # -------------------------------------------------
         # VALIDATION
         # -------------------------------------------------
@@ -112,7 +126,7 @@ async def call_summary(request: Request):
             except Exception as e:
                 print("[TWILIO BUSINESS ERROR]", str(e))
         else:
-            print("[TWILIO] Business SMS skipped (not configured)")
+            print("[TWILIO] Business SMS skipped")
 
 
         # -------------------------------------------------
@@ -137,7 +151,7 @@ async def call_summary(request: Request):
                 except Exception as e:
                     print("[TWILIO CALLER ERROR]", str(e))
             else:
-                print("[TWILIO] Caller SMS skipped (not configured)")
+                print("[TWILIO] Caller SMS skipped")
 
 
         # -------------------------------------------------
@@ -148,6 +162,7 @@ async def call_summary(request: Request):
             "event_type": event_type,
             "client_id": client_id,
             "business": client["business_name"],
+            "user_text": user_text,
             "business_notified": business_sent,
             "caller_notified": caller_sent
         }
