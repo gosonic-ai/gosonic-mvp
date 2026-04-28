@@ -105,71 +105,37 @@ async def triage(request: Request):
 
 
 # -------------------------------------------------
-# PHONE EXTRACTION (FINAL ROBUST VERSION)
+# PHONE NORMALIZATION (SINGLE SOURCE OF TRUTH)
 # -------------------------------------------------
-def extract_phone(text):
+def normalize_phone(text: str):
     if not text:
         return None
 
-    text = text.lower()
+    digits = re.findall(r"\d", text)
 
-    word_map = {
-        "zero":"0","one":"1","two":"2","three":"3","four":"4",
-        "five":"5","six":"6","seven":"7","eight":"8","nine":"9"
-    }
+    if len(digits) < 10:
+        return None
 
-    # 1. PRIORITY: raw digit extraction (most reliable)
-    digits = re.findall(r'\d', text)
-    if len(digits) >= 10:
-        phone = "".join(digits[-10:])
-        if phone.isdigit() and len(phone) == 10:
-            return phone
+    phone = "".join(digits[-10:])
 
-    # 2. fallback: spoken digits
-    tokens = text.split()
-    converted = []
+    # reject fake patterns (all same digit)
+    if len(set(phone)) == 1:
+        return None
 
-    for t in tokens:
-        if t in word_map:
-            converted.append(word_map[t])
-        elif t.isdigit():
-            converted.append(t)
-
-    phone2 = "".join(converted)
-
-    if len(phone2) >= 10:
-        phone2 = phone2[-10:]
-        if phone2.isdigit():
-            return phone2
-
-    return None
+    return f"+1{phone}"
 
 
 # -------------------------------------------------
 # NAME EXTRACTION
 # -------------------------------------------------
 def extract_name(text):
-    match = re.search(r"(my name is|name is)\s+([a-zA-Z]+\s+[a-zA-Z]+)", text, re.IGNORECASE)
+    match = re.search(
+        r"(my name is|name is)\s+([a-zA-Z]+\s+[a-zA-Z]+)",
+        text,
+        re.IGNORECASE
+    )
     if match:
         return match.group(2).title()
-    return None
-
-
-# -------------------------------------------------
-# FORMAT PHONE (TWILIO SAFE)
-# -------------------------------------------------
-def format_phone(phone):
-    if not phone:
-        return None
-
-    phone = phone.strip()
-
-    if phone.startswith("+") and len(phone) >= 11:
-        return phone
-
-    if len(phone) == 10 and phone.isdigit():
-        return f"+1{phone}"
-
     return None
 
 
@@ -234,20 +200,20 @@ async def call_summary(request: Request):
             return {"status": "error", "message": "invalid client_id"}
 
         # -----------------------------
-        # EXTRACTION LAYER
+        # EXTRACTION
         # -----------------------------
         caller_name = data.get("caller_name") or "Unknown"
         caller_phone = data.get("caller_phone")
 
         if not caller_phone:
-            caller_phone = extract_phone(user_text)
+            caller_phone = normalize_phone(user_text)
 
         if not caller_name or caller_name == "Unknown":
             extracted = extract_name(user_text)
             if extracted:
                 caller_name = extracted
 
-        formatted_phone = format_phone(caller_phone)
+        formatted_phone = normalize_phone(caller_phone)
 
         summary = (
             data.get("summary")
@@ -311,7 +277,7 @@ async def call_summary(request: Request):
             "status": "processed",
             "client_id": client_id,
             "caller_name": caller_name,
-            "caller_phone": caller_phone,
+            "caller_phone": formatted_phone,
             "business_notified": business_sent,
             "caller_notified": caller_sent
         }
