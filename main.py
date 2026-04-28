@@ -34,13 +34,11 @@ CLIENTS = {
 }
 
 # -------------------------------------------------
-# DEDUP STORE (call_id + event safety)
+# STRONG DEDUP (ONE CALL = ONE PROCESS ONLY)
 # -------------------------------------------------
-PROCESSED_KEYS = set()
-PROCESSED_TTL = 60 * 10  # 10 min cleanup window
-
-# simple in-memory timestamp store
+PROCESSED_CALLS = set()
 PROCESSED_META = {}
+PROCESSED_TTL = 60 * 10  # 10 min cleanup
 
 
 # -------------------------------------------------
@@ -67,43 +65,48 @@ async def call_summary(request: Request):
         print("📡 EVENT TYPE:", event_type)
 
         # -------------------------------------------------
-        # ONLY PROCESS FINAL CALL EVENT (CRITICAL FIX)
+        # ONLY PROCESS FINAL EVENTS
         # -------------------------------------------------
         FINAL_EVENTS = {"call_analyzed", "call_ended", "call_summary"}
 
         if event_type not in FINAL_EVENTS:
-            print("⏭ Ignoring non-final event:", event_type)
-            return {"status": "ignored_event", "event": event_type}
+            print("⏭ Ignored non-final event:", event_type)
+            return {"status": "ignored_event"}
 
         # -------------------------------------------------
-        # CALL ID + DEDUP (event + call_id combo)
+        # CALL ID (CRITICAL)
         # -------------------------------------------------
         call_id = (
             data.get("call", {}).get("call_id")
             or data.get("call_id")
         )
 
-        dedup_key = f"{call_id}:{event_type}"
+        if not call_id:
+            print("❌ Missing call_id, skipping")
+            return {"status": "error", "message": "missing call_id"}
 
+        # -------------------------------------------------
+        # STRONG DEDUP (ONLY ONCE PER CALL)
+        # -------------------------------------------------
         now = time.time()
 
         # cleanup old entries
         for k in list(PROCESSED_META.keys()):
             if now - PROCESSED_META[k] > PROCESSED_TTL:
                 PROCESSED_META.pop(k, None)
-                PROCESSED_KEYS.discard(k)
+                PROCESSED_CALLS.discard(k)
 
-        if dedup_key in PROCESSED_KEYS:
-            print("⚠️ Duplicate webhook ignored:", dedup_key)
+        if call_id in PROCESSED_CALLS:
+            print("⚠️ Duplicate call ignored:", call_id)
             return {"status": "duplicate_ignored"}
 
-        PROCESSED_KEYS.add(dedup_key)
-        PROCESSED_META[dedup_key] = now
+        PROCESSED_CALLS.add(call_id)
+        PROCESSED_META[call_id] = now
 
-        print("🧷 CALL KEY:", dedup_key)
+        print("🧷 PROCESSING CALL ONCE:", call_id)
 
         # -------------------------------------------------
-        # TRANSCRIPT EXTRACTION (ROBUST)
+        # TRANSCRIPT EXTRACTION
         # -------------------------------------------------
         messages = (
             data.get("transcript_object")
@@ -120,7 +123,7 @@ async def call_summary(request: Request):
         print("🧠 USER TEXT:", user_text)
 
         # -------------------------------------------------
-        # CLIENT ID RESOLUTION
+        # CLIENT RESOLUTION
         # -------------------------------------------------
         client_id = (
             data.get("client_id")
@@ -163,7 +166,7 @@ async def call_summary(request: Request):
         print(f"[GOSONIC] client={client_id} caller={caller_name}")
 
         # -------------------------------------------------
-        # BUSINESS MESSAGE (clean formatting)
+        # BUSINESS SMS
         # -------------------------------------------------
         business_message = (
             "📞 Gosonic Call Alert\n"
@@ -193,7 +196,7 @@ async def call_summary(request: Request):
             print("[TWILIO] Business SMS skipped")
 
         # -------------------------------------------------
-        # CALLER SMS (only if valid phone)
+        # CALLER SMS
         # -------------------------------------------------
         caller_sent = False
 
