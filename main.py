@@ -50,7 +50,47 @@ def root():
 
 
 # -------------------------------------------------
-# CORE WEBHOOK
+# 🔥 NEW: RETELL TRIAGE ENDPOINT (FIX FOR YOUR 404)
+# -------------------------------------------------
+@app.post("/webhook/triage")
+async def triage(request: Request):
+    data = await request.json()
+
+    print("🔥 TRIAGE REQUEST RECEIVED")
+    print(json.dumps(data, indent=2))
+
+    issue_text = data.get("issue_text", "").lower()
+
+    # -----------------------------
+    # SIMPLE HVAC TRIAGE LOGIC
+    # -----------------------------
+    urgent_keywords = [
+        "no heat",
+        "no heating",
+        "gas",
+        "gas smell",
+        "leak",
+        "water leak",
+        "broken",
+        "not working",
+        "failure",
+        "completely down"
+    ]
+
+    route = "STANDARD"
+
+    if any(keyword in issue_text for keyword in urgent_keywords):
+        route = "URGENT"
+
+    print("🧭 ROUTE DECISION:", route)
+
+    return {
+        "route": route
+    }
+
+
+# -------------------------------------------------
+# CORE WEBHOOK (CALL SUMMARY / TWILIO FLOW)
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
 async def call_summary(request: Request):
@@ -64,18 +104,12 @@ async def call_summary(request: Request):
         event_type = data.get("event") or data.get("type") or "unknown"
         print("📡 EVENT TYPE:", event_type)
 
-        # -------------------------------------------------
-        # ONLY PROCESS FINAL EVENTS
-        # -------------------------------------------------
         FINAL_EVENTS = {"call_analyzed", "call_ended", "call_summary"}
 
         if event_type not in FINAL_EVENTS:
             print("⏭ Ignored non-final event:", event_type)
             return {"status": "ignored_event"}
 
-        # -------------------------------------------------
-        # CALL ID (CRITICAL)
-        # -------------------------------------------------
         call_id = (
             data.get("call", {}).get("call_id")
             or data.get("call_id")
@@ -85,12 +119,8 @@ async def call_summary(request: Request):
             print("❌ Missing call_id, skipping")
             return {"status": "error", "message": "missing call_id"}
 
-        # -------------------------------------------------
-        # STRONG DEDUP (ONLY ONCE PER CALL)
-        # -------------------------------------------------
         now = time.time()
 
-        # cleanup old entries
         for k in list(PROCESSED_META.keys()):
             if now - PROCESSED_META[k] > PROCESSED_TTL:
                 PROCESSED_META.pop(k, None)
@@ -105,9 +135,6 @@ async def call_summary(request: Request):
 
         print("🧷 PROCESSING CALL ONCE:", call_id)
 
-        # -------------------------------------------------
-        # TRANSCRIPT EXTRACTION
-        # -------------------------------------------------
         messages = (
             data.get("transcript_object")
             or data.get("call", {}).get("transcript_object")
@@ -122,9 +149,6 @@ async def call_summary(request: Request):
 
         print("🧠 USER TEXT:", user_text)
 
-        # -------------------------------------------------
-        # CLIENT RESOLUTION
-        # -------------------------------------------------
         client_id = (
             data.get("client_id")
             or data.get("call", {}).get("metadata", {}).get("client_id")
@@ -134,9 +158,6 @@ async def call_summary(request: Request):
 
         print("🧾 CLIENT ID:", client_id)
 
-        # -------------------------------------------------
-        # CALLER INFO
-        # -------------------------------------------------
         call_obj = data.get("call", {}) or {}
 
         caller_name = data.get("caller_name") or "Unknown"
@@ -154,9 +175,6 @@ async def call_summary(request: Request):
 
         urgency = data.get("urgency") or "normal"
 
-        # -------------------------------------------------
-        # VALIDATION
-        # -------------------------------------------------
         client = CLIENTS.get(client_id)
 
         if not client:
@@ -165,9 +183,6 @@ async def call_summary(request: Request):
 
         print(f"[GOSONIC] client={client_id} caller={caller_name}")
 
-        # -------------------------------------------------
-        # BUSINESS SMS
-        # -------------------------------------------------
         business_message = (
             "📞 Gosonic Call Alert\n"
             "----------------------\n"
@@ -192,12 +207,7 @@ async def call_summary(request: Request):
                 print("✅ Business SMS sent")
             except Exception as e:
                 print("[TWILIO BUSINESS ERROR]", str(e))
-        else:
-            print("[TWILIO] Business SMS skipped")
 
-        # -------------------------------------------------
-        # CALLER SMS
-        # -------------------------------------------------
         caller_sent = False
 
         if caller_phone and client.get("caller_enabled"):
@@ -218,12 +228,7 @@ async def call_summary(request: Request):
                     print("✅ Caller SMS sent")
                 except Exception as e:
                     print("[TWILIO CALLER ERROR]", str(e))
-            else:
-                print("[TWILIO] Caller SMS skipped")
 
-        # -------------------------------------------------
-        # RESPONSE
-        # -------------------------------------------------
         return {
             "status": "processed",
             "event_type": event_type,
