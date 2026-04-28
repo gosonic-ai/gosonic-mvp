@@ -50,29 +50,35 @@ async def call_summary(request: Request):
     try:
         data = await request.json()
 
-        # 🔥 RAW DEBUG (CRITICAL)
+        # -------------------------------------------------
+        # RAW DEBUG (CRITICAL FOR NOW)
+        # -------------------------------------------------
         print("🔥 RAW PAYLOAD RECEIVED")
         print("🔥 RAW WEBHOOK PAYLOAD:\n", json.dumps(data, indent=2))
 
-        # Event detection (:contentReference[oaicite:0]{index=0})
+        # Event detection
         event_type = data.get("event") or data.get("type") or "unknown"
         print("📡 EVENT TYPE:", event_type)
 
         # -------------------------------------------------
-        # EXTRACT TRANSCRIPT MESSAGES (NEW CORE LOGIC)
+        # EXTRACT TRANSCRIPT MESSAGES (CORE INTENT LAYER)
         # -------------------------------------------------
-        messages = data.get("messages") or data.get("call", {}).get("messages", [])
+        messages = (
+            data.get("transcript_object")
+            or data.get("call", {}).get("transcript_object")
+            or []
+        )
 
         user_text = ""
         for m in messages:
-            if m.get("role") == "user":
+            if isinstance(m, dict) and m.get("role") == "user":
                 user_text += " " + (m.get("content") or "")
 
         user_text = user_text.strip()
         print("🧠 USER TEXT:", user_text)
 
         # -------------------------------------------------
-        # LEGACY / FALLBACK FIELDS (still supported)
+        # SAFE FIELD EXTRACTION
         # -------------------------------------------------
         client_id = data.get("client_id")
 
@@ -82,11 +88,11 @@ async def call_summary(request: Request):
         summary = data.get("summary") or data.get("call_summary") or user_text
         urgency = data.get("urgency") or "normal"
 
-        # Nested fallback (some Retell payloads)
-        if isinstance(data.get("call"), dict):
-            call_data = data["call"]
-            caller_phone = caller_phone or call_data.get("from_number")
-            summary = summary or call_data.get("summary") or user_text
+        # Nested fallback (Retell call object)
+        call_obj = data.get("call")
+        if isinstance(call_obj, dict):
+            caller_phone = caller_phone or call_obj.get("from_number")
+            summary = summary or call_obj.get("summary") or user_text
 
         # -------------------------------------------------
         # VALIDATION
