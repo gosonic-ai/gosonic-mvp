@@ -3,6 +3,7 @@ from twilio.rest import Client
 import os
 import json
 import time
+import re
 
 app = FastAPI()
 
@@ -50,18 +51,12 @@ def root():
 
 
 # -------------------------------------------------
-# 🔥 FIXED TRIAGE ENDPOINT (ROBUST VERSION)
+# TRIAGE ENDPOINT (UNCHANGED CORE)
 # -------------------------------------------------
 @app.post("/webhook/triage")
 async def triage(request: Request):
     data = await request.json()
 
-    print("🔥 TRIAGE REQUEST RECEIVED")
-    print(json.dumps(data, indent=2))
-
-    # -----------------------------
-    # INPUT NORMALIZATION (SAFE)
-    # -----------------------------
     transcript = (
         data.get("transcript")
         or data.get("issue_text")
@@ -71,80 +66,34 @@ async def triage(request: Request):
 
     caller_name = data.get("caller_name") or ""
     caller_phone = data.get("caller_phone") or ""
-    call_id = data.get("call_id") or ""
 
-    # -----------------------------
-    # URGENCY DETECTION (IMPROVED)
-    # -----------------------------
     urgent_keywords = [
-        "no heat",
-        "no heating",
-        "furnace",
-        "gas leak",
-        "gas smell",
-        "water leak",
-        "leak",
-        "broken",
-        "not working",
-        "failure",
-        "completely down",
-        "emergency",
-        "freezing",
-        "urgent"
+        "no heat","no heating","furnace","gas leak","gas smell",
+        "water leak","leak","broken","not working","failure",
+        "completely down","emergency","freezing","urgent"
     ]
 
-    route = "standard"
+    route = "urgent" if any(k in transcript for k in urgent_keywords) else "standard"
 
-    if any(k in transcript for k in urgent_keywords):
-        route = "urgent"
-
-    # -----------------------------
-    # ISSUE CLASSIFICATION (FIXED LOGIC ORDER)
-    # -----------------------------
     issue_type = "other"
 
-    if any(k in transcript for k in ["heat", "heating", "furnace", "no heat"]):
+    if any(k in transcript for k in ["heat", "heating", "furnace"]):
         issue_type = "no_heat"
     elif any(k in transcript for k in ["cool", "ac", "air conditioning"]):
         issue_type = "no_cooling"
-    elif "leak" in transcript or "water" in transcript:
+    elif "leak" in transcript:
         issue_type = "leak"
     elif "maintenance" in transcript:
         issue_type = "maintenance"
 
-    # -----------------------------
-    # SUMMARY GENERATION (ROBUST)
-    # -----------------------------
-    summary = data.get("summary")
+    summary = data.get("summary") or f"Caller reports HVAC issue: {transcript}"
 
-    if not summary:
-        if transcript:
-            summary = f"Caller reports HVAC issue: {transcript}"
-        else:
-            summary = "No transcript provided"
-
-    # -----------------------------
-    # CONFIDENCE MODEL (IMPROVED)
-    # -----------------------------
-    confidence = 0.6
-
-    if route == "urgent":
-        confidence = 0.85
-    else:
-        confidence = 0.7
-
-    if "urgent" in transcript or "emergency" in transcript:
-        confidence = min(confidence + 0.1, 0.95)
-
+    confidence = 0.85 if route == "urgent" else 0.7
     if caller_phone:
         confidence += 0.05
-
     confidence = round(min(confidence, 0.95), 2)
 
-    # -----------------------------
-    # FINAL RESPONSE (CLEAN CONTRACT)
-    # -----------------------------
-    response = {
+    return {
         "route": route,
         "summary": summary,
         "issue_type": issue_type,
@@ -154,14 +103,59 @@ async def triage(request: Request):
         "confidence": confidence
     }
 
-    print("🧭 FINAL TRIAGE RESPONSE:")
-    print(json.dumps(response, indent=2))
 
-    return response
+# -------------------------------------------------
+# HELPER: PHONE EXTRACTION
+# -------------------------------------------------
+def extract_phone(text):
+    word_map = {
+        "zero":"0","one":"1","two":"2","three":"3","four":"4",
+        "five":"5","six":"6","seven":"7","eight":"8","nine":"9"
+    }
+
+    tokens = text.lower().split()
+    digits = []
+
+    for t in tokens:
+        if t in word_map:
+            digits.append(word_map[t])
+        elif t.isdigit():
+            digits.append(t)
+
+    phone = "".join(digits)
+
+    if len(phone) >= 10:
+        return phone[-10:]
+
+    return None
 
 
 # -------------------------------------------------
-# CALL SUMMARY WEBHOOK (UNCHANGED)
+# HELPER: NAME EXTRACTION
+# -------------------------------------------------
+def extract_name(text):
+    match = re.search(r"(my name is|name is)\s+([a-zA-Z]+\s+[a-zA-Z]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(2).title()
+    return None
+
+
+# -------------------------------------------------
+# HELPER: FORMAT PHONE FOR TWILIO
+# -------------------------------------------------
+def format_phone(phone):
+    if not phone:
+        return None
+    phone = phone.strip()
+    if phone.startswith("+"):
+        return phone
+    if len(phone) == 10:
+        return f"+1{phone}"
+    return None
+
+
+# -------------------------------------------------
+# CALL SUMMARY WEBHOOK (FIXED + CALLER SMS)
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
 async def call_summary(request: Request):
@@ -223,8 +217,21 @@ async def call_summary(request: Request):
         if not client:
             return {"status": "error", "message": "invalid client_id"}
 
+        # -----------------------------
+        # EXTRACTION
+        # -----------------------------
         caller_name = data.get("caller_name") or "Unknown"
         caller_phone = data.get("caller_phone")
+
+        if not caller_phone:
+            caller_phone = extract_phone(user_text)
+
+        if not caller_name or caller_name == "Unknown":
+            extracted = extract_name(user_text)
+            if extracted:
+                caller_name = extracted
+
+        formatted_phone = format_phone(caller_phone)
 
         summary = (
             data.get("summary")
@@ -234,6 +241,9 @@ async def call_summary(request: Request):
 
         urgency = data.get("urgency") or "normal"
 
+        # -----------------------------
+        # BUSINESS SMS
+        # -----------------------------
         business_message = (
             "📞 Gosonic Call Alert\n"
             "----------------------\n"
@@ -254,14 +264,42 @@ async def call_summary(request: Request):
                     to=client["business_phone"]
                 )
                 business_sent = True
+                print("✅ Business SMS sent")
             except Exception as e:
-                print("[TWILIO ERROR]", str(e))
+                print("[TWILIO BUSINESS ERROR]", str(e))
+
+        # -----------------------------
+        # CALLER SMS (NEW)
+        # -----------------------------
+        caller_sent = False
+
+        if formatted_phone and client.get("caller_enabled"):
+            caller_message = (
+                f"Hi {caller_name if caller_name != 'Unknown' else ''}, "
+                "we’ve received your HVAC service request. "
+                "A technician will contact you shortly. "
+                "Thank you for choosing Toronto HVAC."
+            )
+
+            if twilio_client and TWILIO_PHONE:
+                try:
+                    twilio_client.messages.create(
+                        body=caller_message,
+                        from_=TWILIO_PHONE,
+                        to=formatted_phone
+                    )
+                    caller_sent = True
+                    print("✅ Caller SMS sent")
+                except Exception as e:
+                    print("[TWILIO CALLER ERROR]", str(e))
 
         return {
             "status": "processed",
             "client_id": client_id,
-            "summary": summary,
-            "business_notified": business_sent
+            "caller_name": caller_name,
+            "caller_phone": caller_phone,
+            "business_notified": business_sent,
+            "caller_notified": caller_sent
         }
 
     except Exception as e:
