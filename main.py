@@ -105,27 +105,39 @@ async def triage(request: Request):
 
 
 # -------------------------------------------------
-# HELPER: PHONE EXTRACTION
+# HELPER: PHONE EXTRACTION (FIXED + ROBUST)
 # -------------------------------------------------
 def extract_phone(text):
+    if not text:
+        return None
+
+    text = text.lower()
+
     word_map = {
         "zero":"0","one":"1","two":"2","three":"3","four":"4",
         "five":"5","six":"6","seven":"7","eight":"8","nine":"9"
     }
 
-    tokens = text.lower().split()
-    digits = []
+    # 1. PRIORITY: extract raw digits directly (MOST RELIABLE)
+    digits = re.findall(r'\d', text)
+    if len(digits) >= 10:
+        phone = "".join(digits[-10:])
+        return phone
+
+    # 2. FALLBACK: spoken numbers
+    tokens = text.split()
+    converted = []
 
     for t in tokens:
         if t in word_map:
-            digits.append(word_map[t])
+            converted.append(word_map[t])
         elif t.isdigit():
-            digits.append(t)
+            converted.append(t)
 
-    phone = "".join(digits)
+    phone2 = "".join(converted)
 
-    if len(phone) >= 10:
-        return phone[-10:]
+    if len(phone2) >= 10:
+        return phone2[-10:]
 
     return None
 
@@ -146,11 +158,17 @@ def extract_name(text):
 def format_phone(phone):
     if not phone:
         return None
+
     phone = phone.strip()
+
+    # already valid
     if phone.startswith("+"):
         return phone
-    if len(phone) == 10:
+
+    # normalize 10-digit US/CA numbers
+    if len(phone) == 10 and phone.isdigit():
         return f"+1{phone}"
+
     return None
 
 
@@ -269,7 +287,7 @@ async def call_summary(request: Request):
                 print("[TWILIO BUSINESS ERROR]", str(e))
 
         # -----------------------------
-        # CALLER SMS (NEW)
+        # CALLER SMS
         # -----------------------------
         caller_sent = False
 
