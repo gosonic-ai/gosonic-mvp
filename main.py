@@ -50,7 +50,7 @@ def root():
 
 
 # -------------------------------------------------
-# 🔥 FIXED TRIAGE ENDPOINT (FULL EXTRACTION)
+# 🔥 FIXED TRIAGE ENDPOINT (ROBUST VERSION)
 # -------------------------------------------------
 @app.post("/webhook/triage")
 async def triage(request: Request):
@@ -60,32 +60,37 @@ async def triage(request: Request):
     print(json.dumps(data, indent=2))
 
     # -----------------------------
-    # INPUT NORMALIZATION
+    # INPUT NORMALIZATION (SAFE)
     # -----------------------------
     transcript = (
         data.get("transcript")
         or data.get("issue_text")
+        or data.get("summary")
         or ""
     ).lower()
 
-    caller_name = data.get("caller_name", "")
-    caller_phone = data.get("caller_phone", "")
-    call_id = data.get("call_id", "")
+    caller_name = data.get("caller_name") or ""
+    caller_phone = data.get("caller_phone") or ""
+    call_id = data.get("call_id") or ""
 
     # -----------------------------
-    # URGENCY LOGIC
+    # URGENCY DETECTION (IMPROVED)
     # -----------------------------
     urgent_keywords = [
         "no heat",
         "no heating",
-        "gas",
+        "furnace",
+        "gas leak",
         "gas smell",
-        "leak",
         "water leak",
+        "leak",
         "broken",
         "not working",
         "failure",
-        "completely down"
+        "completely down",
+        "emergency",
+        "freezing",
+        "urgent"
     ]
 
     route = "standard"
@@ -94,39 +99,50 @@ async def triage(request: Request):
         route = "urgent"
 
     # -----------------------------
-    # ISSUE CLASSIFICATION
+    # ISSUE CLASSIFICATION (FIXED LOGIC ORDER)
     # -----------------------------
     issue_type = "other"
 
-    if "heat" in transcript or "heating" in transcript:
+    if any(k in transcript for k in ["heat", "heating", "furnace", "no heat"]):
         issue_type = "no_heat"
-    elif "cool" in transcript or "ac" in transcript:
+    elif any(k in transcript for k in ["cool", "ac", "air conditioning"]):
         issue_type = "no_cooling"
-    elif "leak" in transcript:
+    elif "leak" in transcript or "water" in transcript:
         issue_type = "leak"
     elif "maintenance" in transcript:
         issue_type = "maintenance"
 
     # -----------------------------
-    # SUMMARY GENERATION (SIMPLE MVP)
+    # SUMMARY GENERATION (ROBUST)
     # -----------------------------
     summary = data.get("summary")
 
     if not summary:
-        summary = f"Caller reports: {transcript}" if transcript else "No transcript provided"
+        if transcript:
+            summary = f"Caller reports HVAC issue: {transcript}"
+        else:
+            summary = "No transcript provided"
 
     # -----------------------------
-    # CONFIDENCE (HEURISTIC)
+    # CONFIDENCE MODEL (IMPROVED)
     # -----------------------------
     confidence = 0.6
 
     if route == "urgent":
         confidence = 0.85
+    else:
+        confidence = 0.7
+
+    if "urgent" in transcript or "emergency" in transcript:
+        confidence = min(confidence + 0.1, 0.95)
+
     if caller_phone:
         confidence += 0.05
 
+    confidence = round(min(confidence, 0.95), 2)
+
     # -----------------------------
-    # FINAL RESPONSE
+    # FINAL RESPONSE (CLEAN CONTRACT)
     # -----------------------------
     response = {
         "route": route,
@@ -157,12 +173,10 @@ async def call_summary(request: Request):
         print(json.dumps(data, indent=2))
 
         event_type = data.get("event") or data.get("type") or "unknown"
-        print("📡 EVENT TYPE:", event_type)
 
         FINAL_EVENTS = {"call_analyzed", "call_ended", "call_summary"}
 
         if event_type not in FINAL_EVENTS:
-            print("⏭ Ignored non-final event:", event_type)
             return {"status": "ignored_event"}
 
         call_id = (
