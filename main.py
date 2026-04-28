@@ -51,7 +51,7 @@ def root():
 
 
 # -------------------------------------------------
-# TRIAGE ENDPOINT (UNCHANGED CORE)
+# TRIAGE ENDPOINT
 # -------------------------------------------------
 @app.post("/webhook/triage")
 async def triage(request: Request):
@@ -105,7 +105,7 @@ async def triage(request: Request):
 
 
 # -------------------------------------------------
-# HELPER: PHONE EXTRACTION (FIXED + ROBUST)
+# PHONE EXTRACTION (FINAL ROBUST VERSION)
 # -------------------------------------------------
 def extract_phone(text):
     if not text:
@@ -118,13 +118,14 @@ def extract_phone(text):
         "five":"5","six":"6","seven":"7","eight":"8","nine":"9"
     }
 
-    # 1. PRIORITY: extract raw digits directly (MOST RELIABLE)
+    # 1. PRIORITY: raw digit extraction (most reliable)
     digits = re.findall(r'\d', text)
     if len(digits) >= 10:
         phone = "".join(digits[-10:])
-        return phone
+        if phone.isdigit() and len(phone) == 10:
+            return phone
 
-    # 2. FALLBACK: spoken numbers
+    # 2. fallback: spoken digits
     tokens = text.split()
     converted = []
 
@@ -137,13 +138,15 @@ def extract_phone(text):
     phone2 = "".join(converted)
 
     if len(phone2) >= 10:
-        return phone2[-10:]
+        phone2 = phone2[-10:]
+        if phone2.isdigit():
+            return phone2
 
     return None
 
 
 # -------------------------------------------------
-# HELPER: NAME EXTRACTION
+# NAME EXTRACTION
 # -------------------------------------------------
 def extract_name(text):
     match = re.search(r"(my name is|name is)\s+([a-zA-Z]+\s+[a-zA-Z]+)", text, re.IGNORECASE)
@@ -153,7 +156,7 @@ def extract_name(text):
 
 
 # -------------------------------------------------
-# HELPER: FORMAT PHONE FOR TWILIO
+# FORMAT PHONE (TWILIO SAFE)
 # -------------------------------------------------
 def format_phone(phone):
     if not phone:
@@ -161,11 +164,9 @@ def format_phone(phone):
 
     phone = phone.strip()
 
-    # already valid
-    if phone.startswith("+"):
+    if phone.startswith("+") and len(phone) >= 11:
         return phone
 
-    # normalize 10-digit US/CA numbers
     if len(phone) == 10 and phone.isdigit():
         return f"+1{phone}"
 
@@ -173,16 +174,13 @@ def format_phone(phone):
 
 
 # -------------------------------------------------
-# CALL SUMMARY WEBHOOK (FIXED + CALLER SMS)
+# CALL SUMMARY WEBHOOK
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
 async def call_summary(request: Request):
 
     try:
         data = await request.json()
-
-        print("🔥 RAW PAYLOAD RECEIVED")
-        print(json.dumps(data, indent=2))
 
         event_type = data.get("event") or data.get("type") or "unknown"
 
@@ -236,7 +234,7 @@ async def call_summary(request: Request):
             return {"status": "error", "message": "invalid client_id"}
 
         # -----------------------------
-        # EXTRACTION
+        # EXTRACTION LAYER
         # -----------------------------
         caller_name = data.get("caller_name") or "Unknown"
         caller_phone = data.get("caller_phone")
@@ -282,7 +280,6 @@ async def call_summary(request: Request):
                     to=client["business_phone"]
                 )
                 business_sent = True
-                print("✅ Business SMS sent")
             except Exception as e:
                 print("[TWILIO BUSINESS ERROR]", str(e))
 
@@ -307,7 +304,6 @@ async def call_summary(request: Request):
                         to=formatted_phone
                     )
                     caller_sent = True
-                    print("✅ Caller SMS sent")
                 except Exception as e:
                     print("[TWILIO CALLER ERROR]", str(e))
 
