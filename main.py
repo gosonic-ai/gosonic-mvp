@@ -117,9 +117,13 @@ def classify_hvac_issue(text: str):
 
     issue_type = "other"
 
+    # IMPORTANT:
+    # Do not match "ac" inside "hvac".
+    cooling_pattern = r"\b(ac|a/c|air conditioning|cool|cooling)\b"
+
     if any(k in text for k in ["heat", "heating", "heater", "furnace"]):
         issue_type = "no_heat"
-    elif any(k in text for k in ["cool", "cooling", "ac", "a/c", "air conditioning"]):
+    elif re.search(cooling_pattern, text):
         issue_type = "no_cooling"
     elif "leak" in text:
         issue_type = "leak"
@@ -153,8 +157,6 @@ def classify_hvac_issue(text: str):
         "urgent"
     ]
 
-    # MVP rule:
-    # Heating failures are urgent. Routine service/checkup is not.
     routine_keywords = [
         "service call",
         "regular service",
@@ -252,8 +254,6 @@ async def call_summary(request: Request):
 
         event_type = data.get("event") or data.get("type")
 
-        # CRITICAL:
-        # Only process Retell post-call analysis so structured extraction fields are available.
         if event_type != "call_analyzed":
             return {"status": "ignored_event", "event_type": event_type}
 
@@ -287,9 +287,19 @@ async def call_summary(request: Request):
             or {}
         )
 
+        # DEBUG: find where Retell is placing post-call extracted fields
+        print("[ANALYSIS DEBUG]")
+        print("top_level_keys:", list(data.keys()))
+        print("call_keys:", list(call.keys()) if isinstance(call, dict) else None)
+        print("analysis_keys:", list(analysis.keys()) if isinstance(analysis, dict) else None)
+        print("analysis_full:", analysis)
+
         custom = (
             analysis.get("custom_analysis_data")
+            or analysis.get("custom_analysis")
+            or analysis.get("post_call_analysis_data")
             or data.get("custom_analysis_data")
+            or data.get("post_call_analysis_data")
             or {}
         )
 
@@ -326,9 +336,6 @@ async def call_summary(request: Request):
                 "client_id": client_id
             }
 
-        # -------------------------------------------------
-        # PRIMARY SOURCE: Retell Post-Call Extraction
-        # -------------------------------------------------
         caller_name = (
             custom.get("full_name")
             or custom.get("caller_name")
@@ -360,9 +367,6 @@ async def call_summary(request: Request):
             or ""
         )
 
-        # -------------------------------------------------
-        # FALLBACKS
-        # -------------------------------------------------
         if caller_name == "Unknown":
             caller_name = extract_name(user_text) or "Unknown"
 
@@ -373,8 +377,6 @@ async def call_summary(request: Request):
 
         classified_urgency, issue_type = classify_hvac_issue(issue_description)
 
-        # Prefer Retell extraction for urgency if present.
-        # If Retell did not provide urgency, use backend classification.
         if not custom.get("urgency"):
             urgency = classified_urgency
 
@@ -385,9 +387,6 @@ async def call_summary(request: Request):
 
         short_summary = build_short_summary(urgency, issue_type)
 
-        # -------------------------------------------------
-        # DEBUG
-        # -------------------------------------------------
         print("[CALL SUMMARY DEBUG]")
         print("event_type:", event_type)
         print("call_id:", call_id)
@@ -401,9 +400,6 @@ async def call_summary(request: Request):
         print("issue_type:", issue_type)
         print("short_summary:", short_summary)
 
-        # -------------------------------------------------
-        # BUSINESS SMS
-        # -------------------------------------------------
         business_message = (
             "📞 Gosonic Call Alert\n"
             "----------------------\n"
@@ -434,9 +430,6 @@ async def call_summary(request: Request):
             business_error = "Twilio client or TWILIO_PHONE missing"
             print("[TWILIO BUSINESS SKIPPED]", business_error)
 
-        # -------------------------------------------------
-        # CALLER SMS
-        # -------------------------------------------------
         caller_sent = False
         caller_error = None
 
