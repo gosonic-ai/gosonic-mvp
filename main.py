@@ -19,7 +19,7 @@ if TWILIO_SID and TWILIO_AUTH_TOKEN:
     twilio_client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
     print("✅ Twilio client initialized")
 else:
-    print("⚠️ Twilio not configured (missing env vars)")
+    print("⚠️ Twilio not configured")
 
 
 # -------------------------------------------------
@@ -35,7 +35,7 @@ CLIENTS = {
 
 
 # -------------------------------------------------
-# STRONG DEDUP
+# DEDUP
 # -------------------------------------------------
 PROCESSED_CALLS = set()
 PROCESSED_META = {}
@@ -51,7 +51,7 @@ def root():
 
 
 # -------------------------------------------------
-# PHONE NORMALIZATION
+# HELPERS
 # -------------------------------------------------
 def normalize_phone(text: str):
     if not text:
@@ -70,30 +70,47 @@ def normalize_phone(text: str):
     return f"+1{phone}"
 
 
-# -------------------------------------------------
-# NAME EXTRACTION
-# -------------------------------------------------
-def extract_name(text):
+def extract_name(text: str):
     if not text:
         return None
 
-    match = re.search(
-        r"(my name is|name is)\s+([a-zA-Z]+\s+[a-zA-Z]+)",
-        text,
-        re.IGNORECASE
-    )
+    patterns = [
+        r"(my name is|name is|this is|i am|i'm)\s+([a-zA-Z]+\s+[a-zA-Z]+)",
+        r"(my name is|name is|this is|i am|i'm)\s+([a-zA-Z]+)"
+    ]
 
-    if match:
-        return match.group(2).title()
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(2).title()
 
     return None
 
 
-# -------------------------------------------------
-# TRIAGE CLASSIFICATION
-# -------------------------------------------------
-def classify_hvac_issue(transcript: str):
-    text = (transcript or "").lower()
+def get_nested(data, path, default=None):
+    current = data
+
+    for key in path:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key)
+
+    return current if current is not None else default
+
+
+def classify_hvac_issue(text: str):
+    text = (text or "").lower()
+
+    issue_type = "other"
+
+    if any(k in text for k in ["heat", "heating", "heater", "furnace"]):
+        issue_type = "no_heat"
+    elif any(k in text for k in ["cool", "cooling", "ac", "a/c", "air conditioning"]):
+        issue_type = "no_cooling"
+    elif "leak" in text:
+        issue_type = "leak"
+    elif any(k in text for k in ["maintenance", "tune up", "service check"]):
+        issue_type = "maintenance"
 
     urgent_keywords = [
         "no heat",
@@ -125,25 +142,12 @@ def classify_hvac_issue(transcript: str):
         "urgent"
     ]
 
-    # TEMP MVP OVERRIDE:
-    # Any heating failure or heat-related issue routes urgent.
     heating_override_keywords = [
         "heat",
         "heating",
         "heater",
         "furnace"
     ]
-
-    issue_type = "other"
-
-    if any(k in text for k in ["heat", "heating", "heater", "furnace"]):
-        issue_type = "no_heat"
-    elif any(k in text for k in ["cool", "cooling", "ac", "a/c", "air conditioning"]):
-        issue_type = "no_cooling"
-    elif "leak" in text:
-        issue_type = "leak"
-    elif "maintenance" in text or "tune up" in text or "service check" in text:
-        issue_type = "maintenance"
 
     if any(k in text for k in urgent_keywords):
         urgency = "urgent"
@@ -153,6 +157,37 @@ def classify_hvac_issue(transcript: str):
         urgency = "standard"
 
     return urgency, issue_type
+
+
+def clean_urgency(value):
+    value = (value or "").lower().strip()
+
+    if value == "normal":
+        return "standard"
+
+    if value not in ["urgent", "standard"]:
+        return "standard"
+
+    return value
+
+
+def build_transcript_text(messages):
+    if not isinstance(messages, list):
+        return ""
+
+    user_parts = []
+
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+
+        role = m.get("role")
+        content = m.get("content") or m.get("text") or ""
+
+        if role == "user" and content:
+            user_parts.append(str(content))
+
+    return " ".join(user_parts).strip()
 
 
 # -------------------------------------------------
@@ -176,28 +211,27 @@ async def triage(request: Request):
         data.get("transcript")
         or data.get("issue_text")
         or data.get("summary")
+        or data.get("message")
         or ""
     )
 
-    caller_name = data.get("caller_name") or ""
-    caller_phone = data.get("caller_phone") or ""
+    caller_name = data.get("caller_name") or data.get("customer_name") or ""
+    caller_phone = data.get("caller_phone") or data.get("customer_phone") or ""
 
     urgency, issue_type = classify_hvac_issue(transcript_raw)
 
     summary = data.get("summary") or f"Caller reports HVAC issue: {transcript_raw}"
 
     confidence = 0.9 if urgency == "urgent" else 0.75
+
     if caller_phone:
         confidence += 0.05
+
     confidence = round(min(confidence, 0.95), 2)
 
     response = {
-        # CRITICAL FOR RETELL EQUATION TRANSITIONS
         "urgency": urgency,
-
-        # Kept for backwards compatibility / debugging
         "route": urgency,
-
         "summary": summary,
         "issue_type": issue_type,
         "customer_name": caller_name,
@@ -217,20 +251,19 @@ async def triage(request: Request):
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
 async def call_summary(request: Request):
-
     try:
         data = await request.json()
 
         event_type = data.get("event") or data.get("type") or "unknown"
-
         FINAL_EVENTS = {"call_analyzed", "call_ended", "call_summary"}
 
         if event_type not in FINAL_EVENTS:
             return {"status": "ignored_event", "event_type": event_type}
 
         call_id = (
-            data.get("call", {}).get("call_id")
+            get_nested(data, ["call", "call_id"])
             or data.get("call_id")
+            or data.get("id")
         )
 
         if not call_id:
@@ -249,86 +282,137 @@ async def call_summary(request: Request):
         PROCESSED_CALLS.add(call_id)
         PROCESSED_META[call_id] = now
 
+        # -------------------------------------------------
+        # RETELL / PAYLOAD EXTRACTION
+        # -------------------------------------------------
+        call_data = data.get("call") or {}
+        metadata = call_data.get("metadata") or {}
+        analysis = call_data.get("analysis") or data.get("analysis") or {}
+        custom_analysis = analysis.get("custom_analysis_data") or {}
+
         messages = (
             data.get("transcript_object")
-            or data.get("call", {}).get("transcript_object")
+            or call_data.get("transcript_object")
             or []
         )
 
-        user_text = " ".join(
-            m.get("content", "")
-            for m in messages
-            if isinstance(m, dict) and m.get("role") == "user"
-        ).strip()
+        user_text = build_transcript_text(messages)
+
+        full_transcript = (
+            data.get("transcript")
+            or call_data.get("transcript")
+            or user_text
+            or ""
+        )
 
         client_id = (
             data.get("client_id")
-            or data.get("call", {}).get("metadata", {}).get("client_id")
+            or metadata.get("client_id")
+            or custom_analysis.get("client_id")
             or "hvac_toronto_001"
         )
 
         client = CLIENTS.get(client_id)
 
         if not client:
-            return {"status": "error", "message": "invalid client_id"}
+            return {"status": "error", "message": "invalid client_id", "client_id": client_id}
 
-        # -----------------------------
-        # EXTRACTION
-        # -----------------------------
-        caller_name = data.get("caller_name") or "Unknown"
+        caller_name = (
+            data.get("caller_name")
+            or data.get("customer_name")
+            or custom_analysis.get("caller_name")
+            or custom_analysis.get("customer_name")
+            or metadata.get("caller_name")
+            or metadata.get("customer_name")
+            or "Unknown"
+        )
 
         caller_phone_raw = (
             data.get("caller_phone")
-            or data.get("call", {}).get("from_number")
+            or data.get("customer_phone")
+            or custom_analysis.get("caller_phone")
+            or custom_analysis.get("customer_phone")
+            or metadata.get("caller_phone")
+            or metadata.get("customer_phone")
+            or call_data.get("from_number")
             or data.get("from_number")
             or ""
         )
 
         if not caller_phone_raw:
-            caller_phone_raw = normalize_phone(user_text) or ""
+            caller_phone_raw = normalize_phone(user_text) or normalize_phone(full_transcript) or ""
 
         if not caller_name or caller_name == "Unknown":
-            extracted = extract_name(user_text)
-            if extracted:
-                caller_name = extracted
+            extracted_name = extract_name(user_text) or extract_name(full_transcript)
+            if extracted_name:
+                caller_name = extracted_name
 
         formatted_phone = normalize_phone(caller_phone_raw)
 
         summary = (
             data.get("summary")
             or data.get("call_summary")
+            or analysis.get("call_summary")
+            or custom_analysis.get("summary")
+            or custom_analysis.get("call_summary")
             or user_text
+            or full_transcript
             or "No summary available."
         )
 
-        urgency = (
+        payload_urgency = (
             data.get("urgency")
             or data.get("route")
-            or "standard"
+            or custom_analysis.get("urgency")
+            or custom_analysis.get("route")
+            or metadata.get("urgency")
+            or metadata.get("route")
+            or ""
         )
 
-        if urgency == "normal":
-            urgency = "standard"
+        urgency = clean_urgency(payload_urgency)
 
+        # CRITICAL FIX:
+        # Reclassify final call text again so we do not depend on Retell
+        # correctly passing triage variables into the final webhook.
+        classification_text = " ".join([
+            str(user_text or ""),
+            str(full_transcript or ""),
+            str(summary or "")
+        ])
+
+        classified_urgency, issue_type = classify_hvac_issue(classification_text)
+
+        if classified_urgency == "urgent":
+            urgency = "urgent"
+
+        # -------------------------------------------------
+        # DEBUG LOGS
+        # -------------------------------------------------
         print("[CALL SUMMARY DEBUG]")
         print("event_type:", event_type)
         print("call_id:", call_id)
+        print("client_id:", client_id)
         print("caller_name:", caller_name)
         print("caller_phone_raw:", caller_phone_raw)
         print("formatted_phone:", formatted_phone)
-        print("urgency:", urgency)
+        print("payload_urgency:", payload_urgency)
+        print("final_urgency:", urgency)
+        print("issue_type:", issue_type)
         print("user_text:", user_text)
+        print("summary:", summary)
 
-        # -----------------------------
+        # -------------------------------------------------
         # BUSINESS SMS
-        # -----------------------------
+        # -------------------------------------------------
         business_message = (
             "📞 Gosonic Call Alert\n"
             "----------------------\n"
             f"Business: {client['business_name']}\n"
             f"Caller: {caller_name}\n"
             f"Phone: {formatted_phone or caller_phone_raw or 'Unknown'}\n"
-            f"Urgency: {urgency}\n\n"
+            f"Urgency: {urgency.upper()}\n"
+            f"Issue Type: {issue_type}\n\n"
             f"Summary:\n{summary}"
         )
 
@@ -351,9 +435,9 @@ async def call_summary(request: Request):
             business_error = "Twilio client or TWILIO_PHONE missing"
             print("[TWILIO BUSINESS SKIPPED]", business_error)
 
-        # -----------------------------
+        # -------------------------------------------------
         # CALLER SMS
-        # -----------------------------
+        # -------------------------------------------------
         caller_sent = False
         caller_error = None
 
@@ -363,8 +447,7 @@ async def call_summary(request: Request):
             caller_message = (
                 f"Hi {display_name}, "
                 "we’ve received your HVAC service request. "
-                "A confirmation text will be sent with the details shortly. "
-                "Thank you for choosing Toronto HVAC."
+                "Toronto HVAC has been notified and will follow up shortly."
             )
 
             if twilio_client and TWILIO_PHONE:
@@ -382,7 +465,6 @@ async def call_summary(request: Request):
             else:
                 caller_error = "Twilio client or TWILIO_PHONE missing"
                 print("[TWILIO CALLER SKIPPED]", caller_error)
-
         else:
             if not formatted_phone:
                 caller_error = "Missing or invalid caller phone"
@@ -394,10 +476,12 @@ async def call_summary(request: Request):
         return {
             "status": "processed",
             "client_id": client_id,
+            "call_id": call_id,
             "caller_name": caller_name,
             "caller_phone_raw": caller_phone_raw,
             "caller_phone": formatted_phone,
             "urgency": urgency,
+            "issue_type": issue_type,
             "business_notified": business_sent,
             "business_error": business_error,
             "caller_notified": caller_sent,
