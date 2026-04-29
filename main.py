@@ -117,8 +117,6 @@ def classify_hvac_issue(text: str):
 
     issue_type = "other"
 
-    # IMPORTANT:
-    # Do not match "ac" inside "hvac".
     cooling_pattern = r"\b(ac|a/c|air conditioning|cool|cooling)\b"
 
     if any(k in text for k in ["heat", "heating", "heater", "furnace"]):
@@ -281,13 +279,15 @@ async def call_summary(request: Request):
         PROCESSED_CALLS.add(call_id)
         PROCESSED_META[call_id] = now
 
+        # IMPORTANT:
+        # Retell places post-call data under call.call_analysis.
         analysis = (
-            call.get("analysis")
+            call.get("call_analysis")
+            or call.get("analysis")
             or data.get("analysis")
             or {}
         )
 
-        # DEBUG: find where Retell is placing post-call extracted fields
         print("[ANALYSIS DEBUG]")
         print("top_level_keys:", list(data.keys()))
         print("call_keys:", list(call.keys()) if isinstance(call, dict) else None)
