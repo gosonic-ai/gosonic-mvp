@@ -358,10 +358,17 @@ async def call_summary(request: Request):
 
         urgency = clean_urgency(custom.get("urgency"))
 
+        # Caller phone source order:
+        # 1. Retell post-call extraction fallback
+        # 2. Top-level fields
+        # 3. Retell call.from_number
+        # 4. Retell inbound payload: call.call_inbound.from_number
+        # 5. Metadata fallback
         caller_phone_raw = (
             custom.get("caller_phone")
             or data.get("caller_phone")
             or call.get("from_number")
+            or (call.get("call_inbound") or {}).get("from_number")
             or data.get("from_number")
             or metadata.get("caller_phone")
             or ""
