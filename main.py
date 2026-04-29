@@ -98,6 +98,37 @@ def get_nested(data, path, default=None):
     return current if current is not None else default
 
 
+def clean_urgency(value):
+    value = (value or "").lower().strip()
+
+    if value == "normal":
+        return "standard"
+
+    if value not in ["urgent", "standard"]:
+        return "standard"
+
+    return value
+
+
+def build_transcript_text(messages):
+    if not isinstance(messages, list):
+        return ""
+
+    user_parts = []
+
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+
+        role = m.get("role")
+        content = m.get("content") or m.get("text") or ""
+
+        if role == "user" and content:
+            user_parts.append(str(content))
+
+    return " ".join(user_parts).strip()
+
+
 def classify_hvac_issue(text: str):
     text = (text or "").lower()
 
@@ -109,7 +140,7 @@ def classify_hvac_issue(text: str):
         issue_type = "no_cooling"
     elif "leak" in text:
         issue_type = "leak"
-    elif any(k in text for k in ["maintenance", "tune up", "service check"]):
+    elif any(k in text for k in ["maintenance", "tune up", "service check", "regular service", "routine service"]):
         issue_type = "maintenance"
 
     urgent_keywords = [
@@ -117,10 +148,15 @@ def classify_hvac_issue(text: str):
         "no heating",
         "no hot air",
         "not heating",
+        "not blowing hot air",
         "heater is out",
+        "heater is down",
+        "heater down",
         "heat is out",
         "heating is out",
         "furnace is out",
+        "furnace is down",
+        "furnace down",
         "furnace stopped",
         "furnace not working",
         "not putting out heat",
@@ -159,35 +195,26 @@ def classify_hvac_issue(text: str):
     return urgency, issue_type
 
 
-def clean_urgency(value):
-    value = (value or "").lower().strip()
+def build_short_summary(urgency, issue_type):
+    if urgency == "urgent":
+        if issue_type == "no_heat":
+            return "EMERGENCY SERVICE REQUEST — Heater/furnace down or not heating."
+        if issue_type == "leak":
+            return "EMERGENCY SERVICE REQUEST — Leak reported."
+        if issue_type == "no_cooling":
+            return "EMERGENCY SERVICE REQUEST — Cooling/AC issue."
+        return "EMERGENCY SERVICE REQUEST — Urgent HVAC issue."
 
-    if value == "normal":
-        return "standard"
+    if issue_type == "maintenance":
+        return "HVAC SERVICE REQUEST — Routine service/checkup."
+    if issue_type == "no_cooling":
+        return "HVAC SERVICE REQUEST — Cooling/AC issue."
+    if issue_type == "no_heat":
+        return "HVAC SERVICE REQUEST — Heating issue."
+    if issue_type == "leak":
+        return "HVAC SERVICE REQUEST — Leak reported."
 
-    if value not in ["urgent", "standard"]:
-        return "standard"
-
-    return value
-
-
-def build_transcript_text(messages):
-    if not isinstance(messages, list):
-        return ""
-
-    user_parts = []
-
-    for m in messages:
-        if not isinstance(m, dict):
-            continue
-
-        role = m.get("role")
-        content = m.get("content") or m.get("text") or ""
-
-        if role == "user" and content:
-            user_parts.append(str(content))
-
-    return " ".join(user_parts).strip()
+    return "HVAC SERVICE REQUEST — Standard HVAC service request."
 
 
 # -------------------------------------------------
@@ -287,8 +314,17 @@ async def call_summary(request: Request):
         # -------------------------------------------------
         call_data = data.get("call") or {}
         metadata = call_data.get("metadata") or {}
+
         analysis = call_data.get("analysis") or data.get("analysis") or {}
         custom_analysis = analysis.get("custom_analysis_data") or {}
+
+        dynamic_variables = (
+            data.get("dynamic_variables")
+            or call_data.get("dynamic_variables")
+            or data.get("variables")
+            or call_data.get("variables")
+            or {}
+        )
 
         messages = (
             data.get("transcript_object")
@@ -309,16 +345,22 @@ async def call_summary(request: Request):
             data.get("client_id")
             or metadata.get("client_id")
             or custom_analysis.get("client_id")
+            or dynamic_variables.get("client_id")
             or "hvac_toronto_001"
         )
 
         client = CLIENTS.get(client_id)
 
         if not client:
-            return {"status": "error", "message": "invalid client_id", "client_id": client_id}
+            return {
+                "status": "error",
+                "message": "invalid client_id",
+                "client_id": client_id
+            }
 
         caller_name = (
-            data.get("caller_name")
+            dynamic_variables.get("full_name")
+            or data.get("caller_name")
             or data.get("customer_name")
             or custom_analysis.get("caller_name")
             or custom_analysis.get("customer_name")
@@ -327,8 +369,22 @@ async def call_summary(request: Request):
             or "Unknown"
         )
 
+        if not caller_name or caller_name == "Unknown":
+            extracted_name = extract_name(user_text) or extract_name(full_transcript)
+            if extracted_name:
+                caller_name = extracted_name
+
+        service_address = (
+            dynamic_variables.get("service_address")
+            or data.get("service_address")
+            or custom_analysis.get("service_address")
+            or metadata.get("service_address")
+            or "Unknown"
+        )
+
         caller_phone_raw = (
-            data.get("caller_phone")
+            dynamic_variables.get("caller_phone")
+            or data.get("caller_phone")
             or data.get("customer_phone")
             or custom_analysis.get("caller_phone")
             or custom_analysis.get("customer_phone")
@@ -340,28 +396,30 @@ async def call_summary(request: Request):
         )
 
         if not caller_phone_raw:
-            caller_phone_raw = normalize_phone(user_text) or normalize_phone(full_transcript) or ""
-
-        if not caller_name or caller_name == "Unknown":
-            extracted_name = extract_name(user_text) or extract_name(full_transcript)
-            if extracted_name:
-                caller_name = extracted_name
+            caller_phone_raw = (
+                normalize_phone(user_text)
+                or normalize_phone(full_transcript)
+                or ""
+            )
 
         formatted_phone = normalize_phone(caller_phone_raw)
 
-        summary = (
-            data.get("summary")
+        issue_description = (
+            dynamic_variables.get("issue_description")
+            or data.get("issue_description")
+            or custom_analysis.get("issue_description")
+            or metadata.get("issue_description")
+            or data.get("summary")
             or data.get("call_summary")
             or analysis.get("call_summary")
-            or custom_analysis.get("summary")
-            or custom_analysis.get("call_summary")
             or user_text
             or full_transcript
-            or "No summary available."
+            or "No issue description available."
         )
 
         payload_urgency = (
-            data.get("urgency")
+            dynamic_variables.get("urgency")
+            or data.get("urgency")
             or data.get("route")
             or custom_analysis.get("urgency")
             or custom_analysis.get("route")
@@ -372,19 +430,25 @@ async def call_summary(request: Request):
 
         urgency = clean_urgency(payload_urgency)
 
-        # CRITICAL FIX:
-        # Reclassify final call text again so we do not depend on Retell
-        # correctly passing triage variables into the final webhook.
         classification_text = " ".join([
             str(user_text or ""),
             str(full_transcript or ""),
-            str(summary or "")
+            str(issue_description or "")
         ])
 
         classified_urgency, issue_type = classify_hvac_issue(classification_text)
 
         if classified_urgency == "urgent":
             urgency = "urgent"
+
+        issue_type = (
+            dynamic_variables.get("issue_type")
+            or custom_analysis.get("issue_type")
+            or data.get("issue_type")
+            or issue_type
+        )
+
+        short_summary = build_short_summary(urgency, issue_type)
 
         # -------------------------------------------------
         # DEBUG LOGS
@@ -393,14 +457,16 @@ async def call_summary(request: Request):
         print("event_type:", event_type)
         print("call_id:", call_id)
         print("client_id:", client_id)
+        print("dynamic_variables:", dynamic_variables)
         print("caller_name:", caller_name)
         print("caller_phone_raw:", caller_phone_raw)
         print("formatted_phone:", formatted_phone)
+        print("service_address:", service_address)
         print("payload_urgency:", payload_urgency)
         print("final_urgency:", urgency)
         print("issue_type:", issue_type)
-        print("user_text:", user_text)
-        print("summary:", summary)
+        print("issue_description:", issue_description)
+        print("short_summary:", short_summary)
 
         # -------------------------------------------------
         # BUSINESS SMS
@@ -409,11 +475,11 @@ async def call_summary(request: Request):
             "📞 Gosonic Call Alert\n"
             "----------------------\n"
             f"Business: {client['business_name']}\n"
+            f"Urgency: {urgency.upper()}\n"
             f"Caller: {caller_name}\n"
             f"Phone: {formatted_phone or caller_phone_raw or 'Unknown'}\n"
-            f"Urgency: {urgency.upper()}\n"
-            f"Issue Type: {issue_type}\n\n"
-            f"Summary:\n{summary}"
+            f"Address: {service_address}\n\n"
+            f"Summary:\n{short_summary}"
         )
 
         business_sent = False
@@ -447,7 +513,8 @@ async def call_summary(request: Request):
             caller_message = (
                 f"Hi {display_name}, "
                 "we’ve received your HVAC service request. "
-                "Toronto HVAC has been notified and will follow up shortly."
+                "A confirmation has been sent to Toronto HVAC. "
+                "Thank you."
             )
 
             if twilio_client and TWILIO_PHONE:
@@ -480,8 +547,10 @@ async def call_summary(request: Request):
             "caller_name": caller_name,
             "caller_phone_raw": caller_phone_raw,
             "caller_phone": formatted_phone,
+            "service_address": service_address,
             "urgency": urgency,
             "issue_type": issue_type,
+            "summary": short_summary,
             "business_notified": business_sent,
             "business_error": business_error,
             "caller_notified": caller_sent,
