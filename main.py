@@ -221,6 +221,63 @@ def build_short_summary(urgency, issue_type):
 
 
 # -------------------------------------------------
+# RETELL INBOUND WEBHOOK
+# -------------------------------------------------
+@app.post("/webhook/inbound")
+async def inbound_webhook(request: Request):
+    try:
+        data = await request.json()
+
+        call_inbound = data.get("call_inbound") or {}
+
+        from_number = (
+            call_inbound.get("from_number")
+            or data.get("from_number")
+            or ""
+        )
+
+        to_number = (
+            call_inbound.get("to_number")
+            or data.get("to_number")
+            or ""
+        )
+
+        formatted_phone = normalize_phone(from_number)
+
+        print("[INBOUND WEBHOOK]")
+        print("from_number:", from_number)
+        print("formatted_phone:", formatted_phone)
+        print("to_number:", to_number)
+
+        return {
+            "call_inbound": {
+                "dynamic_variables": {
+                    "caller_phone": formatted_phone or from_number,
+                    "client_id": "hvac_toronto_001"
+                },
+                "metadata": {
+                    "caller_phone": formatted_phone or from_number,
+                    "client_id": "hvac_toronto_001"
+                }
+            }
+        }
+
+    except Exception as e:
+        print("[INBOUND WEBHOOK ERROR]", str(e))
+
+        return {
+            "call_inbound": {
+                "dynamic_variables": {
+                    "client_id": "hvac_toronto_001"
+                },
+                "metadata": {
+                    "client_id": "hvac_toronto_001"
+                }
+            }
+        }
+
+
+# -------------------------------------------------
 # TRIAGE ENDPOINT
 # -------------------------------------------------
 @app.post("/webhook/triage")
@@ -304,6 +361,7 @@ async def call_summary(request: Request):
             print("call_id:", call_id)
             print("caller_phone_raw:", caller_phone_raw)
             print("formatted_phone:", formatted_phone)
+            print("metadata:", metadata)
             print("call_keys:", list(call.keys()) if isinstance(call, dict) else None)
 
             if formatted_phone:
@@ -333,7 +391,6 @@ async def call_summary(request: Request):
         PROCESSED_CALLS.add(call_id)
         PROCESSED_META[call_id] = now
 
-        # Retell places post-call extraction under call.call_analysis
         analysis = (
             call.get("call_analysis")
             or call.get("analysis")
@@ -381,9 +438,6 @@ async def call_summary(request: Request):
                 "client_id": client_id
             }
 
-        # -------------------------------------------------
-        # STRUCTURED DATA FROM RETELL POST-CALL ANALYSIS
-        # -------------------------------------------------
         caller_name = (
             custom.get("full_name")
             or custom.get("caller_name")
@@ -406,20 +460,14 @@ async def call_summary(request: Request):
 
         urgency = clean_urgency(custom.get("urgency"))
 
-        # Phone source order:
-        # 1. caller_phone from Retell extraction if present
-        # 2. phone stored from call_started
-        # 3. direct call_analyzed payload fields if present
-        # 4. metadata
-        # 5. transcript fallback
         caller_phone_raw = (
             custom.get("caller_phone")
+            or metadata.get("caller_phone")
             or CALL_PHONE_MAP.get(call_id)
             or data.get("caller_phone")
             or call.get("from_number")
             or (call.get("call_inbound") or {}).get("from_number")
             or data.get("from_number")
-            or metadata.get("caller_phone")
             or ""
         )
 
@@ -433,8 +481,6 @@ async def call_summary(request: Request):
 
         classified_urgency, issue_type = classify_hvac_issue(issue_description)
 
-        # Prefer Retell post-call urgency if available.
-        # If missing, fall back to backend classification.
         if not custom.get("urgency"):
             urgency = classified_urgency
 
@@ -449,6 +495,7 @@ async def call_summary(request: Request):
         print("event_type:", event_type)
         print("call_id:", call_id)
         print("custom_analysis:", custom)
+        print("metadata:", metadata)
         print("caller_name:", caller_name)
         print("service_address:", service_address)
         print("caller_phone_raw:", caller_phone_raw)
@@ -531,7 +578,6 @@ async def call_summary(request: Request):
 
             print("[TWILIO CALLER SKIPPED]", caller_error)
 
-        # Clean stored phone after final processing
         CALL_PHONE_MAP.pop(call_id, None)
         CALL_PHONE_META.pop(call_id, None)
 
