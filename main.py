@@ -35,11 +35,14 @@ CLIENTS = {
 
 
 # -------------------------------------------------
-# DEDUP
+# STATE / DEDUP
 # -------------------------------------------------
 PROCESSED_CALLS = set()
 PROCESSED_META = {}
 PROCESSED_TTL = 60 * 10
+
+CALL_PHONE_MAP = {}
+CALL_PHONE_META = {}
 
 
 # -------------------------------------------------
@@ -58,6 +61,7 @@ def normalize_phone(text: str):
         return None
 
     digits = re.findall(r"\d", str(text))
+
     if len(digits) < 10:
         return None
 
@@ -73,14 +77,14 @@ def extract_name(text: str):
     if not text:
         return None
 
-    patterns = [
+    match = re.search(
         r"(my name is|this is|i am|i'm)\s+([a-zA-Z]+\s+[a-zA-Z]+)",
-    ]
+        text,
+        re.IGNORECASE
+    )
 
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(2).title()
+    if match:
+        return match.group(2).title()
 
     return None
 
@@ -105,11 +109,25 @@ def build_transcript_text(messages):
 
     for m in messages:
         if isinstance(m, dict) and m.get("role") == "user":
-            content = m.get("content") or ""
+            content = m.get("content") or m.get("text") or ""
             if content:
-                user_parts.append(content)
+                user_parts.append(str(content))
 
     return " ".join(user_parts).strip()
+
+
+def cleanup_state():
+    now = time.time()
+
+    for k in list(PROCESSED_META.keys()):
+        if now - PROCESSED_META[k] > PROCESSED_TTL:
+            PROCESSED_META.pop(k, None)
+            PROCESSED_CALLS.discard(k)
+
+    for k in list(CALL_PHONE_META.keys()):
+        if now - CALL_PHONE_META[k] > PROCESSED_TTL:
+            CALL_PHONE_META.pop(k, None)
+            CALL_PHONE_MAP.pop(k, None)
 
 
 def classify_hvac_issue(text: str):
@@ -117,6 +135,7 @@ def classify_hvac_issue(text: str):
 
     issue_type = "other"
 
+    # Do not match "ac" inside "hvac"
     cooling_pattern = r"\b(ac|a/c|air conditioning|cool|cooling)\b"
 
     if any(k in text for k in ["heat", "heating", "heater", "furnace"]):
@@ -250,11 +269,9 @@ async def call_summary(request: Request):
     try:
         data = await request.json()
 
+        cleanup_state()
+
         event_type = data.get("event") or data.get("type")
-
-        if event_type != "call_analyzed":
-            return {"status": "ignored_event", "event_type": event_type}
-
         call = data.get("call") or {}
 
         call_id = (
@@ -266,12 +283,49 @@ async def call_summary(request: Request):
         if not call_id:
             return {"status": "error", "message": "missing call_id"}
 
-        now = time.time()
+        metadata = call.get("metadata") or {}
 
-        for k in list(PROCESSED_META.keys()):
-            if now - PROCESSED_META[k] > PROCESSED_TTL:
-                PROCESSED_META.pop(k, None)
-                PROCESSED_CALLS.discard(k)
+        # -------------------------------------------------
+        # CALL_STARTED — STORE CALLER PHONE
+        # -------------------------------------------------
+        if event_type == "call_started":
+            caller_phone_raw = (
+                data.get("caller_phone")
+                or call.get("from_number")
+                or (call.get("call_inbound") or {}).get("from_number")
+                or data.get("from_number")
+                or metadata.get("caller_phone")
+                or ""
+            )
+
+            formatted_phone = normalize_phone(caller_phone_raw)
+
+            print("[CALL STARTED DEBUG]")
+            print("call_id:", call_id)
+            print("caller_phone_raw:", caller_phone_raw)
+            print("formatted_phone:", formatted_phone)
+            print("call_keys:", list(call.keys()) if isinstance(call, dict) else None)
+
+            if formatted_phone:
+                CALL_PHONE_MAP[call_id] = formatted_phone
+                CALL_PHONE_META[call_id] = time.time()
+                print(f"[PHONE STORED] {call_id} -> {formatted_phone}")
+            else:
+                print(f"[PHONE NOT FOUND ON CALL_STARTED] {call_id}")
+
+            return {
+                "status": "phone_capture_processed",
+                "call_id": call_id,
+                "caller_phone": formatted_phone
+            }
+
+        # -------------------------------------------------
+        # ONLY PROCESS CALL_ANALYZED FOR SMS
+        # -------------------------------------------------
+        if event_type != "call_analyzed":
+            return {"status": "ignored_event", "event_type": event_type}
+
+        now = time.time()
 
         if call_id in PROCESSED_CALLS:
             return {"status": "duplicate_ignored", "call_id": call_id}
@@ -279,20 +333,13 @@ async def call_summary(request: Request):
         PROCESSED_CALLS.add(call_id)
         PROCESSED_META[call_id] = now
 
-        # IMPORTANT:
-        # Retell places post-call data under call.call_analysis.
+        # Retell places post-call extraction under call.call_analysis
         analysis = (
             call.get("call_analysis")
             or call.get("analysis")
             or data.get("analysis")
             or {}
         )
-
-        print("[ANALYSIS DEBUG]")
-        print("top_level_keys:", list(data.keys()))
-        print("call_keys:", list(call.keys()) if isinstance(call, dict) else None)
-        print("analysis_keys:", list(analysis.keys()) if isinstance(analysis, dict) else None)
-        print("analysis_full:", analysis)
 
         custom = (
             analysis.get("custom_analysis_data")
@@ -302,8 +349,6 @@ async def call_summary(request: Request):
             or data.get("post_call_analysis_data")
             or {}
         )
-
-        metadata = call.get("metadata") or {}
 
         messages = (
             call.get("transcript_object")
@@ -336,6 +381,9 @@ async def call_summary(request: Request):
                 "client_id": client_id
             }
 
+        # -------------------------------------------------
+        # STRUCTURED DATA FROM RETELL POST-CALL ANALYSIS
+        # -------------------------------------------------
         caller_name = (
             custom.get("full_name")
             or custom.get("caller_name")
@@ -358,14 +406,15 @@ async def call_summary(request: Request):
 
         urgency = clean_urgency(custom.get("urgency"))
 
-        # Caller phone source order:
-        # 1. Retell post-call extraction fallback
-        # 2. Top-level fields
-        # 3. Retell call.from_number
-        # 4. Retell inbound payload: call.call_inbound.from_number
-        # 5. Metadata fallback
+        # Phone source order:
+        # 1. caller_phone from Retell extraction if present
+        # 2. phone stored from call_started
+        # 3. direct call_analyzed payload fields if present
+        # 4. metadata
+        # 5. transcript fallback
         caller_phone_raw = (
             custom.get("caller_phone")
+            or CALL_PHONE_MAP.get(call_id)
             or data.get("caller_phone")
             or call.get("from_number")
             or (call.get("call_inbound") or {}).get("from_number")
@@ -384,6 +433,8 @@ async def call_summary(request: Request):
 
         classified_urgency, issue_type = classify_hvac_issue(issue_description)
 
+        # Prefer Retell post-call urgency if available.
+        # If missing, fall back to backend classification.
         if not custom.get("urgency"):
             urgency = classified_urgency
 
@@ -401,12 +452,16 @@ async def call_summary(request: Request):
         print("caller_name:", caller_name)
         print("service_address:", service_address)
         print("caller_phone_raw:", caller_phone_raw)
+        print("stored_phone:", CALL_PHONE_MAP.get(call_id))
         print("formatted_phone:", formatted_phone)
         print("issue_description:", issue_description)
         print("urgency:", urgency)
         print("issue_type:", issue_type)
         print("short_summary:", short_summary)
 
+        # -------------------------------------------------
+        # BUSINESS SMS
+        # -------------------------------------------------
         business_message = (
             "📞 Gosonic Call Alert\n"
             "----------------------\n"
@@ -437,6 +492,9 @@ async def call_summary(request: Request):
             business_error = "Twilio client or TWILIO_PHONE missing"
             print("[TWILIO BUSINESS SKIPPED]", business_error)
 
+        # -------------------------------------------------
+        # CALLER SMS
+        # -------------------------------------------------
         caller_sent = False
         caller_error = None
 
@@ -472,6 +530,10 @@ async def call_summary(request: Request):
                 caller_error = "Caller SMS disabled for client"
 
             print("[TWILIO CALLER SKIPPED]", caller_error)
+
+        # Clean stored phone after final processing
+        CALL_PHONE_MAP.pop(call_id, None)
+        CALL_PHONE_META.pop(call_id, None)
 
         return {
             "status": "processed",
