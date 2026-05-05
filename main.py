@@ -101,6 +101,27 @@ def clean_urgency(value):
     return value
 
 
+# -------------------------------------------------
+# ✅ NEW: CLEAN CALL OUTCOME NORMALIZATION
+# -------------------------------------------------
+def clean_call_outcome(value):
+    value = (value or "").lower().strip()
+
+    allowed = {
+        "confirmed",
+        "address_fallback",
+        "failed_phone",
+        "off_topic",
+        "unable_to_complete",
+        "unknown"
+    }
+
+    if value in allowed:
+        return value
+
+    return "unknown"
+
+
 def build_transcript_text(messages):
     if not isinstance(messages, list):
         return ""
@@ -218,6 +239,47 @@ def build_short_summary(urgency, issue_type):
         return "HVAC SERVICE REQUEST — Leak reported."
 
     return "HVAC SERVICE REQUEST — Standard HVAC service request."
+
+
+# -------------------------------------------------
+# ✅ NEW: SMS ELIGIBILITY ENGINE
+# -------------------------------------------------
+def get_sms_policy(call_outcome, required_fields_present):
+    """
+    Central SMS decision layer.
+
+    confirmed:
+        - business SMS: yes
+        - caller SMS: yes
+
+    address_fallback:
+        - business SMS: yes
+        - caller SMS: yes, with fallback wording
+
+    everything else:
+        - no business SMS
+        - no caller SMS
+    """
+
+    if call_outcome == "confirmed" and required_fields_present:
+        return {
+            "business": True,
+            "caller": True,
+            "reason": "confirmed_request"
+        }
+
+    if call_outcome == "address_fallback":
+        return {
+            "business": True,
+            "caller": True,
+            "reason": "address_fallback"
+        }
+
+    return {
+        "business": False,
+        "caller": False,
+        "reason": f"sms_suppressed_for_{call_outcome}"
+    }
 
 
 # -------------------------------------------------
@@ -460,6 +522,11 @@ async def call_summary(request: Request):
 
         urgency = clean_urgency(custom.get("urgency"))
 
+        # -------------------------------------------------
+        # ✅ NEW: READ CALL OUTCOME FROM RETELL POST-CALL DATA
+        # -------------------------------------------------
+        call_outcome = clean_call_outcome(custom.get("call_outcome"))
+
         caller_phone_raw = (
             custom.get("caller_phone")
             or metadata.get("caller_phone")
@@ -491,6 +558,24 @@ async def call_summary(request: Request):
 
         short_summary = build_short_summary(urgency, issue_type)
 
+        # -------------------------------------------------
+        # ✅ NEW: REQUIRED FIELD CHECK
+        # -------------------------------------------------
+        required_fields_present = all([
+            caller_name and caller_name != "Unknown",
+            formatted_phone,
+            service_address and service_address != "Unknown",
+            issue_description and issue_description != "No issue description available."
+        ])
+
+        # -------------------------------------------------
+        # ✅ NEW: SMS POLICY DECISION
+        # -------------------------------------------------
+        sms_policy = get_sms_policy(call_outcome, required_fields_present)
+        send_business_sms = sms_policy["business"]
+        send_caller_sms = sms_policy["caller"]
+        sms_policy_reason = sms_policy["reason"]
+
         print("[CALL SUMMARY DEBUG]")
         print("event_type:", event_type)
         print("call_id:", call_id)
@@ -505,25 +590,43 @@ async def call_summary(request: Request):
         print("urgency:", urgency)
         print("issue_type:", issue_type)
         print("short_summary:", short_summary)
+        print("call_outcome:", call_outcome)
+        print("required_fields_present:", required_fields_present)
+        print("sms_policy:", sms_policy)
 
         # -------------------------------------------------
         # BUSINESS SMS
         # -------------------------------------------------
-        business_message = (
-            "📞 Gosonic Call Alert\n"
-            "----------------------\n"
-            f"Business: {client['business_name']}\n"
-            f"Urgency: {urgency.upper()}\n"
-            f"Caller: {caller_name}\n"
-            f"Phone: {formatted_phone or 'Unknown'}\n"
-            f"Address: {service_address}\n\n"
-            f"Summary:\n{short_summary}"
-        )
+        if call_outcome == "address_fallback":
+            business_message = (
+                "📞 Gosonic Call Alert\n"
+                "----------------------\n"
+                f"Business: {client['business_name']}\n"
+                f"Outcome: ADDRESS NEEDS CONFIRMATION\n"
+                f"Urgency: {urgency.upper()}\n"
+                f"Caller: {caller_name}\n"
+                f"Phone: {formatted_phone or 'Unknown'}\n"
+                f"Address Provided: {service_address}\n\n"
+                f"Summary:\n{short_summary}\n\n"
+                "Action Required:\nCall the customer back to confirm the service address."
+            )
+        else:
+            business_message = (
+                "📞 Gosonic Call Alert\n"
+                "----------------------\n"
+                f"Business: {client['business_name']}\n"
+                f"Outcome: {call_outcome.upper()}\n"
+                f"Urgency: {urgency.upper()}\n"
+                f"Caller: {caller_name}\n"
+                f"Phone: {formatted_phone or 'Unknown'}\n"
+                f"Address: {service_address}\n\n"
+                f"Summary:\n{short_summary}"
+            )
 
         business_sent = False
         business_error = None
 
-        if twilio_client and TWILIO_PHONE:
+        if send_business_sms and twilio_client and TWILIO_PHONE:
             try:
                 twilio_client.messages.create(
                     body=business_message,
@@ -536,7 +639,11 @@ async def call_summary(request: Request):
                 business_error = str(e)
                 print("[TWILIO BUSINESS ERROR]", business_error)
         else:
-            business_error = "Twilio client or TWILIO_PHONE missing"
+            if not send_business_sms:
+                business_error = f"Business SMS suppressed: {sms_policy_reason}"
+            elif not twilio_client or not TWILIO_PHONE:
+                business_error = "Twilio client or TWILIO_PHONE missing"
+
             print("[TWILIO BUSINESS SKIPPED]", business_error)
 
         # -------------------------------------------------
@@ -545,15 +652,23 @@ async def call_summary(request: Request):
         caller_sent = False
         caller_error = None
 
-        if formatted_phone and client.get("caller_enabled"):
+        if send_caller_sms and formatted_phone and client.get("caller_enabled"):
             display_name = caller_name if caller_name != "Unknown" else "there"
 
-            caller_message = (
-                f"Hi {display_name}, "
-                "we’ve received your HVAC service request. "
-                "Toronto HVAC has been notified. "
-                "Thank you."
-            )
+            if call_outcome == "address_fallback":
+                caller_message = (
+                    f"Hi {display_name}, "
+                    "we’ve received your HVAC service request. "
+                    "Toronto HVAC has been notified and will call you back "
+                    "to confirm the service address. Thank you."
+                )
+            else:
+                caller_message = (
+                    f"Hi {display_name}, "
+                    "we’ve received your HVAC service request. "
+                    "Toronto HVAC has been notified. "
+                    "Thank you."
+                )
 
             if twilio_client and TWILIO_PHONE:
                 try:
@@ -571,7 +686,9 @@ async def call_summary(request: Request):
                 caller_error = "Twilio client or TWILIO_PHONE missing"
                 print("[TWILIO CALLER SKIPPED]", caller_error)
         else:
-            if not formatted_phone:
+            if not send_caller_sms:
+                caller_error = f"Caller SMS suppressed: {sms_policy_reason}"
+            elif not formatted_phone:
                 caller_error = "Missing or invalid caller phone"
             elif not client.get("caller_enabled"):
                 caller_error = "Caller SMS disabled for client"
@@ -585,12 +702,15 @@ async def call_summary(request: Request):
             "status": "processed",
             "client_id": client_id,
             "call_id": call_id,
+            "call_outcome": call_outcome,
+            "sms_policy_reason": sms_policy_reason,
             "caller_name": caller_name,
             "caller_phone": formatted_phone,
             "service_address": service_address,
             "urgency": urgency,
             "issue_type": issue_type,
             "summary": short_summary,
+            "required_fields_present": required_fields_present,
             "business_notified": business_sent,
             "business_error": business_error,
             "caller_notified": caller_sent,
