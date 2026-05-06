@@ -24,7 +24,7 @@ else:
 
 
 # -------------------------------------------------
-# CLIENT MAP
+# CLIENT MAP — FALLBACK ONLY
 # -------------------------------------------------
 CLIENTS = {
     "hvac_toronto_001": {
@@ -161,6 +161,7 @@ def init_db():
             "message": str(e)
         }
 
+
 # -------------------------------------------------
 # CLIENTS READ ENDPOINT
 # -------------------------------------------------
@@ -223,6 +224,7 @@ def get_clients():
             "status": "error",
             "message": str(e)
         }
+
 
 # -------------------------------------------------
 # HELPERS
@@ -405,6 +407,85 @@ def build_short_summary(urgency, issue_type):
         return "HVAC SERVICE REQUEST — Leak reported."
 
     return "HVAC SERVICE REQUEST — Standard HVAC service request."
+
+
+# -------------------------------------------------
+# DATABASE CLIENT LOOKUP
+# -------------------------------------------------
+def get_client_by_key(client_key: str):
+    """
+    Primary client lookup from PostgreSQL.
+
+    Falls back to the hardcoded CLIENTS map if:
+    - DATABASE_URL is missing
+    - DB lookup fails
+    - client row is not found
+
+    This keeps the MVP stable while moving toward a database-backed platform.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not client_key:
+        return None
+
+    if database_url:
+        try:
+            with psycopg.connect(database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT
+                            client_key,
+                            business_name,
+                            business_phone,
+                            caller_sms_enabled,
+                            status,
+                            vertical,
+                            plan_tier,
+                            timezone
+                        FROM clients
+                        WHERE client_key = %s
+                        LIMIT 1;
+                    """, (client_key,))
+
+                    row = cur.fetchone()
+
+            if row:
+                client = {
+                    "client_key": row[0],
+                    "business_name": row[1],
+                    "business_phone": row[2],
+                    "caller_enabled": row[3],
+                    "status": row[4],
+                    "vertical": row[5],
+                    "plan_tier": row[6],
+                    "timezone": row[7],
+                    "source": "database"
+                }
+
+                if client["status"] != "active":
+                    print(f"[CLIENT INACTIVE] {client_key}")
+                    return None
+
+                return client
+
+            print(f"[CLIENT DB MISS] {client_key}")
+
+        except Exception as e:
+            print("[CLIENT DB LOOKUP ERROR]", str(e))
+
+    fallback_client = CLIENTS.get(client_key)
+
+    if fallback_client:
+        print(f"[CLIENT FALLBACK USED] {client_key}")
+        return {
+            **fallback_client,
+            "client_key": client_key,
+            "status": "active",
+            "source": "fallback"
+        }
+
+    return None
 
 
 # -------------------------------------------------
@@ -635,12 +716,12 @@ async def call_summary(request: Request):
             or "hvac_toronto_001"
         )
 
-        client = CLIENTS.get(client_id)
+        client = get_client_by_key(client_id)
 
         if not client:
             return {
                 "status": "error",
-                "message": "invalid client_id",
+                "message": "invalid or inactive client_id",
                 "client_id": client_id
             }
 
@@ -715,6 +796,9 @@ async def call_summary(request: Request):
         print("call_id:", call_id)
         print("custom_analysis:", custom)
         print("metadata:", metadata)
+        print("client_id:", client_id)
+        print("client_source:", client.get("source"))
+        print("client_business_name:", client.get("business_name"))
         print("caller_name:", caller_name)
         print("service_address:", service_address)
         print("caller_phone_raw:", caller_phone_raw)
@@ -787,14 +871,14 @@ async def call_summary(request: Request):
                 caller_message = (
                     f"Hi {display_name}, "
                     "we’ve received your HVAC service request. "
-                    "Toronto HVAC has been notified and will call you back "
+                    f"{client['business_name']} has been notified and will call you back "
                     "to confirm the service address. Thank you."
                 )
             else:
                 caller_message = (
                     f"Hi {display_name}, "
                     "we’ve received your HVAC service request. "
-                    "Toronto HVAC has been notified. "
+                    f"{client['business_name']} has been notified. "
                     "Thank you."
                 )
 
@@ -829,6 +913,7 @@ async def call_summary(request: Request):
         return {
             "status": "processed",
             "client_id": client_id,
+            "client_source": client.get("source"),
             "call_id": call_id,
             "call_outcome": call_outcome,
             "sms_policy_reason": sms_policy_reason,
