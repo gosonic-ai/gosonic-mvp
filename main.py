@@ -825,6 +825,76 @@ def get_client_by_inbound_phone(inbound_phone: str):
         print("[INBOUND ROUTING ERROR]", str(e))
         return None
 
+# -------------------------------------------------
+# CLIENT SETTINGS LOOKUP
+# -------------------------------------------------
+def get_client_settings_by_key(client_key: str):
+    """
+    Runtime client behavior/settings lookup.
+
+    This becomes the central configuration layer
+    for platform behavior.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url or not client_key:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        client_key,
+                        greeting_enabled,
+                        custom_greeting,
+                        end_call_enabled,
+                        custom_end_call,
+                        caller_confirmation_enabled,
+                        business_sms_enabled,
+                        caller_sms_enabled,
+                        emergency_detection_enabled,
+                        after_hours_enabled,
+                        calendar_enabled,
+                        crm_enabled,
+                        retell_agent_id,
+                        twilio_inbound_number,
+                        twilio_outbound_number
+                    FROM client_settings
+                    WHERE client_key = %s
+                    LIMIT 1;
+                """, (client_key,))
+
+                row = cur.fetchone()
+
+        if not row:
+            print(f"[CLIENT SETTINGS MISS] {client_key}")
+            return None
+
+        settings = {
+            "client_key": row[0],
+            "greeting_enabled": row[1],
+            "custom_greeting": row[2],
+            "end_call_enabled": row[3],
+            "custom_end_call": row[4],
+            "caller_confirmation_enabled": row[5],
+            "business_sms_enabled": row[6],
+            "caller_sms_enabled": row[7],
+            "emergency_detection_enabled": row[8],
+            "after_hours_enabled": row[9],
+            "calendar_enabled": row[10],
+            "crm_enabled": row[11],
+            "retell_agent_id": row[12],
+            "twilio_inbound_number": row[13],
+            "twilio_outbound_number": row[14]
+        }
+
+        return settings
+
+    except Exception as e:
+        print("[CLIENT SETTINGS LOOKUP ERROR]", str(e))
+        return None
 
 # -------------------------------------------------
 # DATABASE CALL PERSISTENCE
@@ -1175,6 +1245,17 @@ async def call_summary(request: Request):
 
         client = get_client_by_key(client_id)
 
+        client_settings = get_client_settings_by_key(client_id)
+
+        if not client_settings:
+            print(f"[CLIENT SETTINGS FALLBACK] {client_id}")
+
+            client_settings = {
+                "business_sms_enabled": True,
+                "caller_sms_enabled": True,
+                "twilio_outbound_number": TWILIO_PHONE
+            }
+
         if not client:
             return {
                 "status": "error",
@@ -1244,8 +1325,17 @@ async def call_summary(request: Request):
         ])
 
         sms_policy = get_sms_policy(call_outcome, required_fields_present)
-        send_business_sms = sms_policy["business"]
-        send_caller_sms = sms_policy["caller"]
+
+        send_business_sms = (
+            sms_policy["business"]
+            and client_settings.get("business_sms_enabled", True)
+        )
+
+        send_caller_sms = (
+            sms_policy["caller"]
+            and client_settings.get("caller_sms_enabled", True)
+        )
+
         sms_policy_reason = sms_policy["reason"]
 
         print("[CALL SUMMARY DEBUG]")
@@ -1256,6 +1346,7 @@ async def call_summary(request: Request):
         print("client_id:", client_id)
         print("client_source:", client.get("source"))
         print("client_business_name:", client.get("business_name"))
+        print("client_settings:", client_settings)
         print("caller_name:", caller_name)
         print("service_address:", service_address)
         print("caller_phone_raw:", caller_phone_raw)
@@ -1359,7 +1450,7 @@ async def call_summary(request: Request):
                 caller_error = f"Caller SMS suppressed: {sms_policy_reason}"
             elif not formatted_phone:
                 caller_error = "Missing or invalid caller phone"
-            elif not client.get("caller_enabled"):
+            elif not client_settings.get("caller_sms_enabled", True):
                 caller_error = "Caller SMS disabled for client"
 
             print("[TWILIO CALLER SKIPPED]", caller_error)
