@@ -161,6 +161,68 @@ def init_db():
             "message": str(e)
         }
 
+# -------------------------------------------------
+# CLIENTS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/clients")
+def get_clients():
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        client_key,
+                        business_name,
+                        vertical,
+                        plan_tier,
+                        business_phone,
+                        caller_sms_enabled,
+                        status,
+                        timezone,
+                        created_at,
+                        updated_at
+                    FROM clients
+                    ORDER BY created_at ASC;
+                """)
+
+                rows = cur.fetchall()
+
+        clients = []
+
+        for row in rows:
+            clients.append({
+                "client_key": row[0],
+                "business_name": row[1],
+                "vertical": row[2],
+                "plan_tier": row[3],
+                "business_phone": row[4],
+                "caller_sms_enabled": row[5],
+                "status": row[6],
+                "timezone": row[7],
+                "created_at": row[8].isoformat() if row[8] else None,
+                "updated_at": row[9].isoformat() if row[9] else None
+            })
+
+        return {
+            "status": "ok",
+            "count": len(clients),
+            "clients": clients
+        }
+
+    except Exception as e:
+        print("[CLIENTS READ ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 # -------------------------------------------------
 # HELPERS
