@@ -90,6 +90,79 @@ def db_check():
 
 
 # -------------------------------------------------
+# DATABASE INITIALIZATION
+# -------------------------------------------------
+@app.post("/init-db")
+def init_db():
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS clients (
+                        id SERIAL PRIMARY KEY,
+                        client_key TEXT UNIQUE NOT NULL,
+                        business_name TEXT NOT NULL,
+                        vertical TEXT NOT NULL DEFAULT 'hvac',
+                        plan_tier TEXT NOT NULL DEFAULT 'lite',
+                        business_phone TEXT,
+                        caller_sms_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        timezone TEXT NOT NULL DEFAULT 'America/Toronto',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    INSERT INTO clients (
+                        client_key,
+                        business_name,
+                        vertical,
+                        plan_tier,
+                        business_phone,
+                        caller_sms_enabled,
+                        status,
+                        timezone
+                    )
+                    VALUES (
+                        'hvac_toronto_001',
+                        'Toronto HVAC',
+                        'hvac',
+                        'lite',
+                        '+14383896310',
+                        TRUE,
+                        'active',
+                        'America/Toronto'
+                    )
+                    ON CONFLICT (client_key) DO NOTHING;
+                """)
+
+            conn.commit()
+
+        return {
+            "status": "ok",
+            "message": "Database initialized",
+            "tables_created": ["clients"],
+            "seed_client": "hvac_toronto_001"
+        }
+
+    except Exception as e:
+        print("[INIT DB ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+# -------------------------------------------------
 # HELPERS
 # -------------------------------------------------
 def normalize_phone(text: str):
@@ -137,9 +210,6 @@ def clean_urgency(value):
     return value
 
 
-# -------------------------------------------------
-# ✅ CLEAN CALL OUTCOME NORMALIZATION
-# -------------------------------------------------
 def clean_call_outcome(value):
     value = (value or "").lower().strip()
 
@@ -191,8 +261,6 @@ def classify_hvac_issue(text: str):
     text = (text or "").lower()
 
     issue_type = "other"
-
-    # Do not match "ac" inside "hvac"
     cooling_pattern = r"\b(ac|a/c|air conditioning|cool|cooling)\b"
 
     if any(k in text for k in ["heat", "heating", "heater", "furnace"]):
@@ -278,25 +346,9 @@ def build_short_summary(urgency, issue_type):
 
 
 # -------------------------------------------------
-# ✅ SMS ELIGIBILITY ENGINE
+# SMS ELIGIBILITY ENGINE
 # -------------------------------------------------
 def get_sms_policy(call_outcome, required_fields_present):
-    """
-    Central SMS decision layer.
-
-    confirmed:
-        - business SMS: yes
-        - caller SMS: yes
-
-    address_fallback:
-        - business SMS: yes
-        - caller SMS: yes, with fallback wording
-
-    everything else:
-        - no business SMS
-        - no caller SMS
-    """
-
     if call_outcome == "confirmed" and required_fields_present:
         return {
             "business": True,
@@ -440,9 +492,6 @@ async def call_summary(request: Request):
 
         metadata = call.get("metadata") or {}
 
-        # -------------------------------------------------
-        # CALL_STARTED — STORE CALLER PHONE
-        # -------------------------------------------------
         if event_type == "call_started":
             caller_phone_raw = (
                 data.get("caller_phone")
@@ -475,9 +524,6 @@ async def call_summary(request: Request):
                 "caller_phone": formatted_phone
             }
 
-        # -------------------------------------------------
-        # ONLY PROCESS CALL_ANALYZED FOR SMS
-        # -------------------------------------------------
         if event_type != "call_analyzed":
             return {"status": "ignored_event", "event_type": event_type}
 
@@ -557,10 +603,6 @@ async def call_summary(request: Request):
         )
 
         urgency = clean_urgency(custom.get("urgency"))
-
-        # -------------------------------------------------
-        # READ CALL OUTCOME FROM RETELL POST-CALL DATA
-        # -------------------------------------------------
         call_outcome = clean_call_outcome(custom.get("call_outcome"))
 
         caller_phone_raw = (
@@ -594,9 +636,6 @@ async def call_summary(request: Request):
 
         short_summary = build_short_summary(urgency, issue_type)
 
-        # -------------------------------------------------
-        # REQUIRED FIELD CHECK
-        # -------------------------------------------------
         required_fields_present = all([
             caller_name and caller_name != "Unknown",
             formatted_phone,
@@ -604,9 +643,6 @@ async def call_summary(request: Request):
             issue_description and issue_description != "No issue description available."
         ])
 
-        # -------------------------------------------------
-        # SMS POLICY DECISION
-        # -------------------------------------------------
         sms_policy = get_sms_policy(call_outcome, required_fields_present)
         send_business_sms = sms_policy["business"]
         send_caller_sms = sms_policy["caller"]
@@ -630,9 +666,6 @@ async def call_summary(request: Request):
         print("required_fields_present:", required_fields_present)
         print("sms_policy:", sms_policy)
 
-        # -------------------------------------------------
-        # BUSINESS SMS
-        # -------------------------------------------------
         if call_outcome == "address_fallback":
             business_message = (
                 "📞 Gosonic Call Alert\n"
@@ -682,9 +715,6 @@ async def call_summary(request: Request):
 
             print("[TWILIO BUSINESS SKIPPED]", business_error)
 
-        # -------------------------------------------------
-        # CALLER SMS
-        # -------------------------------------------------
         caller_sent = False
         caller_error = None
 
