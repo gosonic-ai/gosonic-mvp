@@ -229,6 +229,7 @@ def get_clients():
                         business_name,
                         vertical,
                         plan_tier,
+                        inbound_phone,
                         business_phone,
                         caller_sms_enabled,
                         status,
@@ -249,12 +250,13 @@ def get_clients():
                 "business_name": row[1],
                 "vertical": row[2],
                 "plan_tier": row[3],
-                "business_phone": row[4],
-                "caller_sms_enabled": row[5],
-                "status": row[6],
-                "timezone": row[7],
-                "created_at": row[8].isoformat() if row[8] else None,
-                "updated_at": row[9].isoformat() if row[9] else None
+                "inbound_phone": row[4],
+                "business_phone": row[5],
+                "caller_sms_enabled": row[6],
+                "status": row[7],
+                "timezone": row[8],
+                "created_at": row[9].isoformat() if row[9] else None,
+                "updated_at": row[10].isoformat() if row[10] else None
             })
 
         return {
