@@ -122,6 +122,26 @@ def init_db():
                 """)
 
                 cur.execute("""
+                    CREATE TABLE IF NOT EXISTS calls (
+                        id SERIAL PRIMARY KEY,
+                        call_id TEXT UNIQUE NOT NULL,
+                        client_key TEXT NOT NULL REFERENCES clients(client_key),
+                        caller_name TEXT,
+                        caller_phone TEXT,
+                        service_address TEXT,
+                        issue_description TEXT,
+                        issue_type TEXT,
+                        urgency TEXT,
+                        call_outcome TEXT,
+                        sms_policy_reason TEXT,
+                        business_notified BOOLEAN NOT NULL DEFAULT FALSE,
+                        caller_notified BOOLEAN NOT NULL DEFAULT FALSE,
+                        raw_payload JSONB,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
                     INSERT INTO clients (
                         client_key,
                         business_name,
@@ -150,7 +170,7 @@ def init_db():
         return {
             "status": "ok",
             "message": "Database initialized",
-            "tables_created": ["clients"],
+            "tables_created": ["clients", "calls"],
             "seed_client": "hvac_toronto_001"
         }
 
@@ -160,7 +180,6 @@ def init_db():
             "status": "error",
             "message": str(e)
         }
-
 
 # -------------------------------------------------
 # CLIENTS READ ENDPOINT
