@@ -538,8 +538,6 @@ def get_client_by_key(client_key: str):
     - DATABASE_URL is missing
     - DB lookup fails
     - client row is not found
-
-    This keeps the MVP stable while moving toward a database-backed platform.
     """
 
     database_url = os.getenv("DATABASE_URL")
@@ -560,7 +558,8 @@ def get_client_by_key(client_key: str):
                             status,
                             vertical,
                             plan_tier,
-                            timezone
+                            timezone,
+                            inbound_phone
                         FROM clients
                         WHERE client_key = %s
                         LIMIT 1;
@@ -578,6 +577,7 @@ def get_client_by_key(client_key: str):
                     "vertical": row[5],
                     "plan_tier": row[6],
                     "timezone": row[7],
+                    "inbound_phone": row[8],
                     "source": "database"
                 }
 
@@ -596,6 +596,7 @@ def get_client_by_key(client_key: str):
 
     if fallback_client:
         print(f"[CLIENT FALLBACK USED] {client_key}")
+
         return {
             **fallback_client,
             "client_key": client_key,
@@ -604,6 +605,75 @@ def get_client_by_key(client_key: str):
         }
 
     return None
+
+
+# -------------------------------------------------
+# DATABASE INBOUND PHONE ROUTING
+# -------------------------------------------------
+def get_client_by_inbound_phone(inbound_phone: str):
+    """
+    Routes inbound calls using the dedicated Gosonic
+    inbound agent phone number.
+
+    This becomes the primary multi-tenant routing layer.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    formatted_phone = normalize_phone(inbound_phone)
+
+    if not database_url or not formatted_phone:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        client_key,
+                        business_name,
+                        business_phone,
+                        caller_sms_enabled,
+                        status,
+                        vertical,
+                        plan_tier,
+                        timezone,
+                        inbound_phone
+                    FROM clients
+                    WHERE inbound_phone = %s
+                    LIMIT 1;
+                """, (formatted_phone,))
+
+                row = cur.fetchone()
+
+        if not row:
+            print(f"[INBOUND ROUTING MISS] {formatted_phone}")
+            return None
+
+        client = {
+            "client_key": row[0],
+            "business_name": row[1],
+            "business_phone": row[2],
+            "caller_enabled": row[3],
+            "status": row[4],
+            "vertical": row[5],
+            "plan_tier": row[6],
+            "timezone": row[7],
+            "inbound_phone": row[8],
+            "source": "database_inbound_phone"
+        }
+
+        if client["status"] != "active":
+            print(f"[INBOUND CLIENT INACTIVE] {formatted_phone}")
+            return None
+
+        print(f"[INBOUND ROUTED] {formatted_phone} -> {client['client_key']}")
+
+        return client
+
+    except Exception as e:
+        print("[INBOUND ROUTING ERROR]", str(e))
+        return None
 
 
 # -------------------------------------------------
@@ -756,22 +826,37 @@ async def inbound_webhook(request: Request):
             or ""
         )
 
-        formatted_phone = normalize_phone(from_number)
+        formatted_from_phone = normalize_phone(from_number)
+        formatted_to_phone = normalize_phone(to_number)
+
+        routed_client = get_client_by_inbound_phone(formatted_to_phone)
+
+        if routed_client:
+            client_id = routed_client["client_key"]
+            routing_source = routed_client.get("source")
+        else:
+            client_id = "hvac_toronto_001"
+            routing_source = "fallback_default_client"
 
         print("[INBOUND WEBHOOK]")
         print("from_number:", from_number)
-        print("formatted_phone:", formatted_phone)
+        print("formatted_from_phone:", formatted_from_phone)
         print("to_number:", to_number)
+        print("formatted_to_phone:", formatted_to_phone)
+        print("client_id:", client_id)
+        print("routing_source:", routing_source)
 
         return {
             "call_inbound": {
                 "dynamic_variables": {
-                    "caller_phone": formatted_phone or from_number,
-                    "client_id": "hvac_toronto_001"
+                    "caller_phone": formatted_from_phone or from_number,
+                    "client_id": client_id
                 },
                 "metadata": {
-                    "caller_phone": formatted_phone or from_number,
-                    "client_id": "hvac_toronto_001"
+                    "caller_phone": formatted_from_phone or from_number,
+                    "client_id": client_id,
+                    "to_number": formatted_to_phone or to_number,
+                    "routing_source": routing_source
                 }
             }
         }
@@ -785,7 +870,8 @@ async def inbound_webhook(request: Request):
                     "client_id": "hvac_toronto_001"
                 },
                 "metadata": {
-                    "client_id": "hvac_toronto_001"
+                    "client_id": "hvac_toronto_001",
+                    "routing_source": "error_fallback"
                 }
             }
         }
