@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from twilio.rest import Client
+from psycopg.types.json import Jsonb
 import psycopg
 import os
 import time
@@ -181,6 +182,7 @@ def init_db():
             "message": str(e)
         }
 
+
 # -------------------------------------------------
 # CLIENTS READ ENDPOINT
 # -------------------------------------------------
@@ -239,6 +241,77 @@ def get_clients():
 
     except Exception as e:
         print("[CLIENTS READ ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+# -------------------------------------------------
+# CALLS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/calls")
+def get_calls():
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        call_id,
+                        client_key,
+                        caller_name,
+                        caller_phone,
+                        service_address,
+                        issue_description,
+                        issue_type,
+                        urgency,
+                        call_outcome,
+                        sms_policy_reason,
+                        business_notified,
+                        caller_notified,
+                        created_at
+                    FROM calls
+                    ORDER BY created_at DESC
+                    LIMIT 50;
+                """)
+
+                rows = cur.fetchall()
+
+        calls = []
+
+        for row in rows:
+            calls.append({
+                "call_id": row[0],
+                "client_key": row[1],
+                "caller_name": row[2],
+                "caller_phone": row[3],
+                "service_address": row[4],
+                "issue_description": row[5],
+                "issue_type": row[6],
+                "urgency": row[7],
+                "call_outcome": row[8],
+                "sms_policy_reason": row[9],
+                "business_notified": row[10],
+                "caller_notified": row[11],
+                "created_at": row[12].isoformat() if row[12] else None
+            })
+
+        return {
+            "status": "ok",
+            "count": len(calls),
+            "calls": calls
+        }
+
+    except Exception as e:
+        print("[CALLS READ ERROR]", str(e))
         return {
             "status": "error",
             "message": str(e)
@@ -505,6 +578,109 @@ def get_client_by_key(client_key: str):
         }
 
     return None
+
+
+# -------------------------------------------------
+# DATABASE CALL PERSISTENCE
+# -------------------------------------------------
+def save_call_record(
+    call_id,
+    client_key,
+    caller_name,
+    caller_phone,
+    service_address,
+    issue_description,
+    issue_type,
+    urgency,
+    call_outcome,
+    sms_policy_reason,
+    business_notified,
+    caller_notified,
+    raw_payload
+):
+    """
+    Persists analyzed call results to PostgreSQL.
+
+    Uses ON CONFLICT so Retell retries or duplicate webhook events
+    do not create duplicate call records.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        print("[CALL SAVE SKIPPED] DATABASE_URL not configured")
+        return {
+            "saved": False,
+            "error": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO calls (
+                        call_id,
+                        client_key,
+                        caller_name,
+                        caller_phone,
+                        service_address,
+                        issue_description,
+                        issue_type,
+                        urgency,
+                        call_outcome,
+                        sms_policy_reason,
+                        business_notified,
+                        caller_notified,
+                        raw_payload
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (call_id) DO UPDATE SET
+                        caller_name = EXCLUDED.caller_name,
+                        caller_phone = EXCLUDED.caller_phone,
+                        service_address = EXCLUDED.service_address,
+                        issue_description = EXCLUDED.issue_description,
+                        issue_type = EXCLUDED.issue_type,
+                        urgency = EXCLUDED.urgency,
+                        call_outcome = EXCLUDED.call_outcome,
+                        sms_policy_reason = EXCLUDED.sms_policy_reason,
+                        business_notified = EXCLUDED.business_notified,
+                        caller_notified = EXCLUDED.caller_notified,
+                        raw_payload = EXCLUDED.raw_payload;
+                """, (
+                    call_id,
+                    client_key,
+                    caller_name,
+                    caller_phone,
+                    service_address,
+                    issue_description,
+                    issue_type,
+                    urgency,
+                    call_outcome,
+                    sms_policy_reason,
+                    business_notified,
+                    caller_notified,
+                    Jsonb(raw_payload)
+                ))
+
+            conn.commit()
+
+        print(f"[CALL SAVED] {call_id}")
+
+        return {
+            "saved": True,
+            "error": None
+        }
+
+    except Exception as e:
+        error = str(e)
+        print("[CALL SAVE ERROR]", error)
+
+        return {
+            "saved": False,
+            "error": error
+        }
 
 
 # -------------------------------------------------
@@ -926,6 +1102,25 @@ async def call_summary(request: Request):
 
             print("[TWILIO CALLER SKIPPED]", caller_error)
 
+        # -------------------------------------------------
+        # PERSIST CALL RECORD
+        # -------------------------------------------------
+        call_save_result = save_call_record(
+            call_id=call_id,
+            client_key=client_id,
+            caller_name=caller_name,
+            caller_phone=formatted_phone,
+            service_address=service_address,
+            issue_description=issue_description,
+            issue_type=issue_type,
+            urgency=urgency,
+            call_outcome=call_outcome,
+            sms_policy_reason=sms_policy_reason,
+            business_notified=business_sent,
+            caller_notified=caller_sent,
+            raw_payload=data
+        )
+
         CALL_PHONE_MAP.pop(call_id, None)
         CALL_PHONE_META.pop(call_id, None)
 
@@ -946,7 +1141,9 @@ async def call_summary(request: Request):
             "business_notified": business_sent,
             "business_error": business_error,
             "caller_notified": caller_sent,
-            "caller_error": caller_error
+            "caller_error": caller_error,
+            "call_saved": call_save_result["saved"],
+            "call_save_error": call_save_result["error"]
         }
 
     except Exception as e:
