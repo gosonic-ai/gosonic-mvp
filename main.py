@@ -417,6 +417,82 @@ def get_calls():
             "message": str(e)
         }
 
+# -------------------------------------------------
+# CLIENT SETTINGS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/client-settings")
+def get_client_settings():
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        client_key,
+                        greeting_enabled,
+                        custom_greeting,
+                        end_call_enabled,
+                        custom_end_call,
+                        caller_confirmation_enabled,
+                        business_sms_enabled,
+                        caller_sms_enabled,
+                        emergency_detection_enabled,
+                        after_hours_enabled,
+                        calendar_enabled,
+                        crm_enabled,
+                        retell_agent_id,
+                        twilio_inbound_number,
+                        twilio_outbound_number,
+                        created_at,
+                        updated_at
+                    FROM client_settings
+                    ORDER BY created_at ASC;
+                """)
+
+                rows = cur.fetchall()
+
+        settings = []
+
+        for row in rows:
+            settings.append({
+                "client_key": row[0],
+                "greeting_enabled": row[1],
+                "custom_greeting": row[2],
+                "end_call_enabled": row[3],
+                "custom_end_call": row[4],
+                "caller_confirmation_enabled": row[5],
+                "business_sms_enabled": row[6],
+                "caller_sms_enabled": row[7],
+                "emergency_detection_enabled": row[8],
+                "after_hours_enabled": row[9],
+                "calendar_enabled": row[10],
+                "crm_enabled": row[11],
+                "retell_agent_id": row[12],
+                "twilio_inbound_number": row[13],
+                "twilio_outbound_number": row[14],
+                "created_at": row[15].isoformat() if row[15] else None,
+                "updated_at": row[16].isoformat() if row[16] else None
+            })
+
+        return {
+            "status": "ok",
+            "count": len(settings),
+            "client_settings": settings
+        }
+
+    except Exception as e:
+        print("[CLIENT SETTINGS READ ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 # -------------------------------------------------
 # HELPERS
