@@ -106,6 +106,10 @@ def init_db():
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
+
+                # -------------------------------------------------
+                # CLIENTS TABLE
+                # -------------------------------------------------
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS clients (
                         id SERIAL PRIMARY KEY,
@@ -113,6 +117,7 @@ def init_db():
                         business_name TEXT NOT NULL,
                         vertical TEXT NOT NULL DEFAULT 'hvac',
                         plan_tier TEXT NOT NULL DEFAULT 'lite',
+                        inbound_phone TEXT UNIQUE,
                         business_phone TEXT,
                         caller_sms_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                         status TEXT NOT NULL DEFAULT 'active',
@@ -122,6 +127,17 @@ def init_db():
                     );
                 """)
 
+                # -------------------------------------------------
+                # SAFE MIGRATION FOR EXISTING DATABASES
+                # -------------------------------------------------
+                cur.execute("""
+                    ALTER TABLE clients
+                    ADD COLUMN IF NOT EXISTS inbound_phone TEXT UNIQUE;
+                """)
+
+                # -------------------------------------------------
+                # CALLS TABLE
+                # -------------------------------------------------
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS calls (
                         id SERIAL PRIMARY KEY,
@@ -142,12 +158,16 @@ def init_db():
                     );
                 """)
 
+                # -------------------------------------------------
+                # SEED CLIENT
+                # -------------------------------------------------
                 cur.execute("""
                     INSERT INTO clients (
                         client_key,
                         business_name,
                         vertical,
                         plan_tier,
+                        inbound_phone,
                         business_phone,
                         caller_sms_enabled,
                         status,
@@ -158,12 +178,15 @@ def init_db():
                         'Toronto HVAC',
                         'hvac',
                         'lite',
+                        '+17059108234',
                         '+14383896310',
                         TRUE,
                         'active',
                         'America/Toronto'
                     )
-                    ON CONFLICT (client_key) DO NOTHING;
+                    ON CONFLICT (client_key)
+                    DO UPDATE SET
+                        inbound_phone = EXCLUDED.inbound_phone;
                 """)
 
             conn.commit()
@@ -172,6 +195,7 @@ def init_db():
             "status": "ok",
             "message": "Database initialized",
             "tables_created": ["clients", "calls"],
+            "routing_enabled": True,
             "seed_client": "hvac_toronto_001"
         }
 
