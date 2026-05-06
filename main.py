@@ -127,12 +127,44 @@ def init_db():
                     );
                 """)
 
-                # -------------------------------------------------
-                # SAFE MIGRATION FOR EXISTING DATABASES
-                # -------------------------------------------------
                 cur.execute("""
                     ALTER TABLE clients
-                    ADD COLUMN IF NOT EXISTS inbound_phone TEXT UNIQUE;
+                    ADD COLUMN IF NOT EXISTS inbound_phone TEXT;
+                """)
+
+                # -------------------------------------------------
+                # CLIENT SETTINGS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS client_settings (
+                        id SERIAL PRIMARY KEY,
+                        client_key TEXT UNIQUE NOT NULL
+                            REFERENCES clients(client_key)
+                            ON DELETE CASCADE,
+
+                        greeting_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        custom_greeting TEXT,
+
+                        end_call_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        custom_end_call TEXT,
+
+                        caller_confirmation_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        business_sms_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        caller_sms_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+
+                        emergency_detection_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        after_hours_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+
+                        calendar_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                        crm_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+
+                        retell_agent_id TEXT,
+                        twilio_inbound_number TEXT,
+                        twilio_outbound_number TEXT,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
                 """)
 
                 # -------------------------------------------------
@@ -189,18 +221,60 @@ def init_db():
                         inbound_phone = EXCLUDED.inbound_phone;
                 """)
 
+                # -------------------------------------------------
+                # SEED CLIENT SETTINGS
+                # -------------------------------------------------
+                cur.execute("""
+                    INSERT INTO client_settings (
+                        client_key,
+                        greeting_enabled,
+                        end_call_enabled,
+                        caller_confirmation_enabled,
+                        business_sms_enabled,
+                        caller_sms_enabled,
+                        emergency_detection_enabled,
+                        after_hours_enabled,
+                        calendar_enabled,
+                        crm_enabled,
+                        twilio_inbound_number,
+                        twilio_outbound_number
+                    )
+                    VALUES (
+                        'hvac_toronto_001',
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        FALSE,
+                        FALSE,
+                        FALSE,
+                        '+17059108234',
+                        '+14383896310'
+                    )
+                    ON CONFLICT (client_key)
+                    DO NOTHING;
+                """)
+
             conn.commit()
 
         return {
             "status": "ok",
             "message": "Database initialized",
-            "tables_created": ["clients", "calls"],
+            "tables_created": [
+                "clients",
+                "client_settings",
+                "calls"
+            ],
             "routing_enabled": True,
+            "settings_enabled": True,
             "seed_client": "hvac_toronto_001"
         }
 
     except Exception as e:
         print("[INIT DB ERROR]", str(e))
+
         return {
             "status": "error",
             "message": str(e)
