@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from twilio.rest import Client
+import psycopg
 import os
 import time
 import re
@@ -54,6 +55,41 @@ def root():
 
 
 # -------------------------------------------------
+# DATABASE CHECK
+# -------------------------------------------------
+@app.get("/db-check")
+def db_check():
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "database": "not_configured",
+            "message": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+                result = cur.fetchone()
+
+        return {
+            "status": "ok",
+            "database": "connected",
+            "result": result[0]
+        }
+
+    except Exception as e:
+        print("[DB CHECK ERROR]", str(e))
+        return {
+            "status": "error",
+            "database": "connection_failed",
+            "message": str(e)
+        }
+
+
+# -------------------------------------------------
 # HELPERS
 # -------------------------------------------------
 def normalize_phone(text: str):
@@ -102,7 +138,7 @@ def clean_urgency(value):
 
 
 # -------------------------------------------------
-# ✅ NEW: CLEAN CALL OUTCOME NORMALIZATION
+# ✅ CLEAN CALL OUTCOME NORMALIZATION
 # -------------------------------------------------
 def clean_call_outcome(value):
     value = (value or "").lower().strip()
@@ -242,7 +278,7 @@ def build_short_summary(urgency, issue_type):
 
 
 # -------------------------------------------------
-# ✅ NEW: SMS ELIGIBILITY ENGINE
+# ✅ SMS ELIGIBILITY ENGINE
 # -------------------------------------------------
 def get_sms_policy(call_outcome, required_fields_present):
     """
@@ -523,7 +559,7 @@ async def call_summary(request: Request):
         urgency = clean_urgency(custom.get("urgency"))
 
         # -------------------------------------------------
-        # ✅ NEW: READ CALL OUTCOME FROM RETELL POST-CALL DATA
+        # READ CALL OUTCOME FROM RETELL POST-CALL DATA
         # -------------------------------------------------
         call_outcome = clean_call_outcome(custom.get("call_outcome"))
 
@@ -559,7 +595,7 @@ async def call_summary(request: Request):
         short_summary = build_short_summary(urgency, issue_type)
 
         # -------------------------------------------------
-        # ✅ NEW: REQUIRED FIELD CHECK
+        # REQUIRED FIELD CHECK
         # -------------------------------------------------
         required_fields_present = all([
             caller_name and caller_name != "Unknown",
@@ -569,7 +605,7 @@ async def call_summary(request: Request):
         ])
 
         # -------------------------------------------------
-        # ✅ NEW: SMS POLICY DECISION
+        # SMS POLICY DECISION
         # -------------------------------------------------
         sms_policy = get_sms_policy(call_outcome, required_fields_present)
         send_business_sms = sms_policy["business"]
