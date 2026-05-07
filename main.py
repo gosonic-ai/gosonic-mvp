@@ -883,6 +883,85 @@ def get_client_contacts(
         print("[CLIENT CONTACTS READ ERROR]", str(e))
         return {"status": "error", "message": str(e)}
 
+# -------------------------------------------------
+# CLIENT ADDRESSES READ ENDPOINT
+# -------------------------------------------------
+@app.get("/client-addresses")
+def get_client_addresses(
+    client_key: str = Query(None),
+    x_admin_key: str = Header(None)
+):
+    require_admin(x_admin_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                if client_key:
+                    cur.execute("""
+                        SELECT
+                            client_key,
+                            address_line_1,
+                            address_line_2,
+                            city,
+                            state_province,
+                            postal_code,
+                            country,
+                            is_primary,
+                            created_at,
+                            updated_at
+                        FROM client_addresses
+                        WHERE client_key = %s
+                        ORDER BY created_at DESC;
+                    """, (client_key,))
+                else:
+                    cur.execute("""
+                        SELECT
+                            client_key,
+                            address_line_1,
+                            address_line_2,
+                            city,
+                            state_province,
+                            postal_code,
+                            country,
+                            is_primary,
+                            created_at,
+                            updated_at
+                        FROM client_addresses
+                        ORDER BY created_at DESC;
+                    """)
+
+                rows = cur.fetchall()
+
+        addresses = []
+
+        for row in rows:
+            addresses.append({
+                "client_key": row[0],
+                "address_line_1": row[1],
+                "address_line_2": row[2],
+                "city": row[3],
+                "state_province": row[4],
+                "postal_code": row[5],
+                "country": row[6],
+                "is_primary": row[7],
+                "created_at": row[8].isoformat() if row[8] else None,
+                "updated_at": row[9].isoformat() if row[9] else None
+            })
+
+        return {
+            "status": "ok",
+            "count": len(addresses),
+            "client_key_filter": client_key,
+            "addresses": addresses
+        }
+
+    except Exception as e:
+        print("[CLIENT ADDRESSES READ ERROR]", str(e))
+        return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
 # CLIENT SETTINGS UPDATE ENDPOINT
