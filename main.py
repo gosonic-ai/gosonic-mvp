@@ -104,6 +104,114 @@ def create_session_token(email: str):
 
 
 # -------------------------------------------------
+# REQUIRE AUTH TOKEN
+# -------------------------------------------------
+def require_auth_token(authorization: str):
+    session_secret = os.getenv("SESSION_SECRET")
+
+    if not session_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="SESSION_SECRET not configured"
+        )
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid authorization header"
+        )
+
+    token = authorization.replace("Bearer ", "").strip()
+
+    try:
+        payload = jwt.decode(
+            token,
+            session_secret,
+            algorithms=["HS256"]
+        )
+
+        return payload
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired"
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid session token"
+        )
+
+
+# -------------------------------------------------
+# AUTH LOGIN ENDPOINT
+# -------------------------------------------------
+@app.post("/auth/login")
+async def auth_login(request: Request):
+    data = await request.json()
+
+    email = data.get("email")
+    password = data.get("password")
+
+    admin_email = os.getenv("ADMIN_EMAIL")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+
+    if not admin_email or not admin_password:
+        return {
+            "status": "error",
+            "message": "Auth environment variables not configured"
+        }
+
+    if email != admin_email or password != admin_password:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials"
+        )
+
+    token = create_session_token(email)
+
+    return {
+        "status": "ok",
+        "token": token,
+        "email": email
+    }
+
+# -------------------------------------------------
+# AUTH SESSION CHECK
+# -------------------------------------------------
+@app.get("/auth/me")
+def auth_me(authorization: str = Header(None)):
+    payload = require_auth_token(authorization)
+
+    return {
+        "status": "ok",
+        "authenticated": True,
+        "email": payload.get("email")
+    }
+
+# -------------------------------------------------
+# CREATE SESSION TOKEN
+# -------------------------------------------------
+def create_session_token(email: str):
+    session_secret = os.getenv("SESSION_SECRET")
+
+    payload = {
+        "email": email,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=12)
+    }
+
+    token = jwt.encode(
+        payload,
+        session_secret,
+        algorithm="HS256"
+    )
+
+    return token
+
+
+# -------------------------------------------------
 # AUTH LOGIN ENDPOINT
 # -------------------------------------------------
 @app.post("/auth/login")
