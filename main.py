@@ -1077,7 +1077,9 @@ def save_call_record(
     call_outcome,
     sms_policy_reason,
     business_notified,
+    business_error,
     caller_notified,
+    caller_error,
     raw_payload
 ):
     """
@@ -1112,11 +1114,13 @@ def save_call_record(
                         call_outcome,
                         sms_policy_reason,
                         business_notified,
+                        business_error,
                         caller_notified,
+                        caller_error,
                         raw_payload
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (call_id) DO UPDATE SET
                         caller_name = EXCLUDED.caller_name,
@@ -1128,7 +1132,9 @@ def save_call_record(
                         call_outcome = EXCLUDED.call_outcome,
                         sms_policy_reason = EXCLUDED.sms_policy_reason,
                         business_notified = EXCLUDED.business_notified,
+                        business_error = EXCLUDED.business_error,
                         caller_notified = EXCLUDED.caller_notified,
+                        caller_error = EXCLUDED.caller_error,
                         raw_payload = EXCLUDED.raw_payload;
                 """, (
                     call_id,
@@ -1142,7 +1148,9 @@ def save_call_record(
                     call_outcome,
                     sms_policy_reason,
                     business_notified,
+                    business_error,
                     caller_notified,
+                    caller_error,
                     Jsonb(raw_payload)
                 ))
 
@@ -1650,7 +1658,9 @@ async def call_summary(request: Request):
             call_outcome=call_outcome,
             sms_policy_reason=sms_policy_reason,
             business_notified=business_sent,
+            business_error=business_error,
             caller_notified=caller_sent,
+            caller_error=caller_error,
             raw_payload=data
         )
 
