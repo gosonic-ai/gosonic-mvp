@@ -828,6 +828,63 @@ def get_client_settings(x_admin_key: str = Header(None)):
         }
 
 # -------------------------------------------------
+# CLIENT CONTACTS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/client-contacts")
+def get_client_contacts(
+    client_key: str = Query(None),
+    x_admin_key: str = Header(None)
+):
+    require_admin(x_admin_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                if client_key:
+                    cur.execute("""
+                        SELECT client_key, first_name, last_name, email, phone, role, is_primary, created_at, updated_at
+                        FROM client_contacts
+                        WHERE client_key = %s
+                        ORDER BY created_at DESC;
+                    """, (client_key,))
+                else:
+                    cur.execute("""
+                        SELECT client_key, first_name, last_name, email, phone, role, is_primary, created_at, updated_at
+                        FROM client_contacts
+                        ORDER BY created_at DESC;
+                    """)
+
+                rows = cur.fetchall()
+
+        contacts = [{
+            "client_key": row[0],
+            "first_name": row[1],
+            "last_name": row[2],
+            "email": row[3],
+            "phone": row[4],
+            "role": row[5],
+            "is_primary": row[6],
+            "created_at": row[7].isoformat() if row[7] else None,
+            "updated_at": row[8].isoformat() if row[8] else None
+        } for row in rows]
+
+        return {
+            "status": "ok",
+            "count": len(contacts),
+            "client_key_filter": client_key,
+            "contacts": contacts
+        }
+
+    except Exception as e:
+        print("[CLIENT CONTACTS READ ERROR]", str(e))
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
 # CLIENT SETTINGS UPDATE ENDPOINT
 # -------------------------------------------------
 @app.post("/client-settings/update-sms-number")
