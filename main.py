@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, Header, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
 from psycopg.types.json import Jsonb
 import psycopg
@@ -7,6 +8,19 @@ import time
 import re
 
 app = FastAPI()
+
+# -------------------------------------------------
+# CORS CONFIGURATION
+# -------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://client.gosonic.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # -------------------------------------------------
 # ADMIN AUTH
