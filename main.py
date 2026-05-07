@@ -452,7 +452,26 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
     plan_tier = data.get("plan_tier", "lite")
     inbound_phone = normalize_phone(data.get("inbound_phone"))
     business_phone = normalize_phone(data.get("business_phone"))
-    timezone = data.get("timezone", "America/Toronto")
+    timezone = data.get("timezone", "America/New_York")
+
+    # -------------------------------------------------
+    # CONTACT FIELDS
+    # -------------------------------------------------
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    email = data.get("email")
+    contact_phone = normalize_phone(data.get("contact_phone"))
+    role = data.get("role", "Owner")
+
+    # -------------------------------------------------
+    # ADDRESS FIELDS
+    # -------------------------------------------------
+    address_line_1 = data.get("address_line_1")
+    address_line_2 = data.get("address_line_2")
+    city = data.get("city")
+    state_province = data.get("state_province")
+    postal_code = data.get("postal_code")
+    country = data.get("country", "CA")
 
     if not client_key or not business_name:
         return {
