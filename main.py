@@ -574,6 +574,79 @@ async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
             "message": str(e)
         }
 
+# -------------------------------------------------
+# CLIENT SMS SETTINGS UPDATE ENDPOINT
+# -------------------------------------------------
+@app.post("/client-settings/update-sms-settings")
+async def update_sms_settings(request: Request, x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    data = await request.json()
+
+    client_key = data.get("client_key")
+    business_sms_enabled = data.get("business_sms_enabled")
+    caller_sms_enabled = data.get("caller_sms_enabled")
+
+    if not client_key:
+        return {
+            "status": "error",
+            "message": "client_key is required"
+        }
+
+    if not isinstance(business_sms_enabled, bool) or not isinstance(caller_sms_enabled, bool):
+        return {
+            "status": "error",
+            "message": "business_sms_enabled and caller_sms_enabled must be true or false"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE client_settings
+                    SET
+                        business_sms_enabled = %s,
+                        caller_sms_enabled = %s,
+                        updated_at = NOW()
+                    WHERE client_key = %s;
+                """, (
+                    business_sms_enabled,
+                    caller_sms_enabled,
+                    client_key
+                ))
+
+                updated = cur.rowcount
+
+            conn.commit()
+
+        if updated == 0:
+            return {
+                "status": "error",
+                "message": "client_settings record not found",
+                "client_key": client_key
+            }
+
+        return {
+            "status": "ok",
+            "client_key": client_key,
+            "business_sms_enabled": business_sms_enabled,
+            "caller_sms_enabled": caller_sms_enabled
+        }
+
+    except Exception as e:
+        print("[SMS SETTINGS UPDATE ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 # -------------------------------------------------
 # HELPERS
