@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header, HTTPException
 from twilio.rest import Client
 from psycopg.types.json import Jsonb
 import psycopg
@@ -7,6 +7,27 @@ import time
 import re
 
 app = FastAPI()
+
+# -------------------------------------------------
+# ADMIN AUTH
+# -------------------------------------------------
+def require_admin(x_admin_key: str):
+    admin_key = os.getenv("ADMIN_API_KEY")
+
+    if not admin_key:
+        raise HTTPException(
+            status_code=500,
+            detail="ADMIN_API_KEY not configured"
+        )
+
+    if x_admin_key != admin_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
+    return True
+
 
 # -------------------------------------------------
 # ENV / TWILIO SETUP
@@ -94,7 +115,8 @@ def db_check():
 # DATABASE INITIALIZATION
 # -------------------------------------------------
 @app.post("/init-db")
-def init_db():
+def init_db(x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -285,7 +307,8 @@ def init_db():
 # CLIENTS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/clients")
-def get_clients():
+def get_clients(x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -351,7 +374,8 @@ def get_clients():
 # CALLS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/calls")
-def get_calls():
+def get_calls(x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -421,7 +445,8 @@ def get_calls():
 # CLIENT SETTINGS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/client-settings")
-def get_client_settings():
+def get_client_settings(x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -1412,7 +1437,7 @@ async def call_summary(request: Request):
         caller_sent = False
         caller_error = None
 
-        if send_caller_sms and formatted_phone and client.get("caller_enabled"):
+        if send_caller_sms and formatted_phone and client_settings.get("caller_sms_enabled", True):
             display_name = caller_name if caller_name != "Unknown" else "there"
 
             if call_outcome == "address_fallback":
