@@ -1414,11 +1414,16 @@ async def call_summary(request: Request):
         business_sent = False
         business_error = None
 
-        if send_business_sms and twilio_client and TWILIO_PHONE:
+        sms_from_number = (
+            client_settings.get("twilio_outbound_number")
+            or TWILIO_PHONE
+        )
+
+        if send_business_sms and twilio_client and sms_from_number:
             try:
                 twilio_client.messages.create(
                     body=business_message,
-                    from_=TWILIO_PHONE,
+                    from_=sms_from_number,
                     to=client["business_phone"]
                 )
                 business_sent = True
@@ -1429,8 +1434,9 @@ async def call_summary(request: Request):
         else:
             if not send_business_sms:
                 business_error = f"Business SMS suppressed: {sms_policy_reason}"
-            elif not twilio_client or not TWILIO_PHONE:
-                business_error = "Twilio client or TWILIO_PHONE missing"
+            elif not twilio_client or not sms_from_number:
+                business_error = "Twilio client or SMS sender number missing"
+                
 
             print("[TWILIO BUSINESS SKIPPED]", business_error)
 
@@ -1455,11 +1461,11 @@ async def call_summary(request: Request):
                     "Thank you."
                 )
 
-            if twilio_client and TWILIO_PHONE:
+            if twilio_client and sms_from_number:
                 try:
                     twilio_client.messages.create(
                         body=caller_message,
-                        from_=TWILIO_PHONE,
+                        from_=sms_from_number,
                         to=formatted_phone
                     )
                     caller_sent = True
@@ -1468,7 +1474,7 @@ async def call_summary(request: Request):
                     caller_error = str(e)
                     print("[TWILIO CALLER ERROR]", caller_error)
             else:
-                caller_error = "Twilio client or TWILIO_PHONE missing"
+                caller_error = "Twilio client or SMS sender number missing"
                 print("[TWILIO CALLER SKIPPED]", caller_error)
         else:
             if not send_caller_sms:
