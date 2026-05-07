@@ -520,6 +520,62 @@ def get_client_settings(x_admin_key: str = Header(None)):
         }
 
 # -------------------------------------------------
+# CLIENT SETTINGS UPDATE ENDPOINT
+# -------------------------------------------------
+@app.post("/client-settings/update-sms-number")
+async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    data = await request.json()
+
+    client_key = data.get("client_key")
+    twilio_outbound_number = normalize_phone(data.get("twilio_outbound_number"))
+
+    if not client_key or not twilio_outbound_number:
+        return {
+            "status": "error",
+            "message": "client_key and valid twilio_outbound_number are required"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE client_settings
+                    SET
+                        twilio_outbound_number = %s,
+                        updated_at = NOW()
+                    WHERE client_key = %s;
+                """, (
+                    twilio_outbound_number,
+                    client_key
+                ))
+
+            conn.commit()
+
+        return {
+            "status": "ok",
+            "client_key": client_key,
+            "twilio_outbound_number": twilio_outbound_number
+        }
+
+    except Exception as e:
+        print("[SMS NUMBER UPDATE ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+# -------------------------------------------------
 # HELPERS
 # -------------------------------------------------
 def normalize_phone(text: str):
