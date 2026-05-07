@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, Query
 from twilio.rest import Client
 from psycopg.types.json import Jsonb
 import psycopg
@@ -386,7 +386,10 @@ def get_clients(x_admin_key: str = Header(None)):
 # CALLS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/calls")
-def get_calls(x_admin_key: str = Header(None)):
+def get_calls(
+    client_key: str = Query(None),
+    x_admin_key: str = Header(None)
+):
     require_admin(x_admin_key)
     database_url = os.getenv("DATABASE_URL")
 
@@ -399,27 +402,52 @@ def get_calls(x_admin_key: str = Header(None)):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT
-                        call_id,
-                        client_key,
-                        caller_name,
-                        caller_phone,
-                        service_address,
-                        issue_description,
-                        issue_type,
-                        urgency,
-                        call_outcome,
-                        sms_policy_reason,
-                        business_notified,
-                        business_error,
-                        caller_notified,
-                        caller_error,
-                        created_at
-                    FROM calls
-                    ORDER BY created_at DESC
-                    LIMIT 50;
-                """)
+
+                if client_key:
+                    cur.execute("""
+                        SELECT
+                            call_id,
+                            client_key,
+                            caller_name,
+                            caller_phone,
+                            service_address,
+                            issue_description,
+                            issue_type,
+                            urgency,
+                            call_outcome,
+                            sms_policy_reason,
+                            business_notified,
+                            business_error,
+                            caller_notified,
+                            caller_error,
+                            created_at
+                        FROM calls
+                        WHERE client_key = %s
+                        ORDER BY created_at DESC
+                        LIMIT 50;
+                    """, (client_key,))
+                else:
+                    cur.execute("""
+                        SELECT
+                            call_id,
+                            client_key,
+                            caller_name,
+                            caller_phone,
+                            service_address,
+                            issue_description,
+                            issue_type,
+                            urgency,
+                            call_outcome,
+                            sms_policy_reason,
+                            business_notified,
+                            business_error,
+                            caller_notified,
+                            caller_error,
+                            created_at
+                        FROM calls
+                        ORDER BY created_at DESC
+                        LIMIT 50;
+                    """)
 
                 rows = cur.fetchall()
 
@@ -447,6 +475,7 @@ def get_calls(x_admin_key: str = Header(None)):
         return {
             "status": "ok",
             "count": len(calls),
+            "client_key_filter": client_key,
             "calls": calls
         }
 
