@@ -206,10 +206,22 @@ def init_db(x_admin_key: str = Header(None)):
                         call_outcome TEXT,
                         sms_policy_reason TEXT,
                         business_notified BOOLEAN NOT NULL DEFAULT FALSE,
+                        business_error TEXT,
                         caller_notified BOOLEAN NOT NULL DEFAULT FALSE,
+                        caller_error TEXT,
                         raw_payload JSONB,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS business_error TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS caller_error TEXT;
                 """)
 
                 # -------------------------------------------------
