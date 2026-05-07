@@ -1599,17 +1599,25 @@ async def call_summary(request: Request):
                     )
                     caller_sent = True
                     print("[TWILIO CALLER] Sent")
+
                 except Exception as e:
                     caller_error = str(e)
                     print("[TWILIO CALLER ERROR]", caller_error)
+
             else:
                 caller_error = "Twilio client or SMS sender number missing"
                 print("[TWILIO CALLER SKIPPED]", caller_error)
+
         else:
             if not send_caller_sms:
-                caller_error = f"Caller SMS suppressed: {sms_policy_reason}"
+                if not client_settings.get("caller_sms_enabled", True):
+                    caller_error = "Caller SMS disabled by client settings"
+                else:
+                    caller_error = f"Caller SMS suppressed: {sms_policy_reason}"
+
             elif not formatted_phone:
                 caller_error = "Missing or invalid caller phone"
+
             elif not client_settings.get("caller_sms_enabled", True):
                 caller_error = "Caller SMS disabled for client"
 
