@@ -412,7 +412,9 @@ def get_calls(x_admin_key: str = Header(None)):
                         call_outcome,
                         sms_policy_reason,
                         business_notified,
+                        business_error,
                         caller_notified,
+                        caller_error,
                         created_at
                     FROM calls
                     ORDER BY created_at DESC
@@ -436,8 +438,10 @@ def get_calls(x_admin_key: str = Header(None)):
                 "call_outcome": row[8],
                 "sms_policy_reason": row[9],
                 "business_notified": row[10],
-                "caller_notified": row[11],
-                "created_at": row[12].isoformat() if row[12] else None
+                "business_error": row[11],
+                "caller_notified": row[12],
+                "caller_error": row[13],
+                "created_at": row[14].isoformat() if row[14] else None
             })
 
         return {
