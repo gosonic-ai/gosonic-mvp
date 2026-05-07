@@ -2,7 +2,9 @@ from fastapi import FastAPI, Request, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
 from psycopg.types.json import Jsonb
+from datetime import datetime, timedelta, timezone
 import psycopg
+import jwt
 import os
 import time
 import re
@@ -81,6 +83,58 @@ PROCESSED_TTL = 60 * 10
 CALL_PHONE_MAP = {}
 CALL_PHONE_META = {}
 
+# -------------------------------------------------
+# CREATE SESSION TOKEN
+# -------------------------------------------------
+def create_session_token(email: str):
+    session_secret = os.getenv("SESSION_SECRET")
+
+    payload = {
+        "email": email,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=12)
+    }
+
+    token = jwt.encode(
+        payload,
+        session_secret,
+        algorithm="HS256"
+    )
+
+    return token
+
+
+# -------------------------------------------------
+# AUTH LOGIN ENDPOINT
+# -------------------------------------------------
+@app.post("/auth/login")
+async def auth_login(request: Request):
+    data = await request.json()
+
+    email = data.get("email")
+    password = data.get("password")
+
+    admin_email = os.getenv("ADMIN_EMAIL")
+    admin_password = os.getenv("ADMIN_PASSWORD")
+
+    if not admin_email or not admin_password:
+        return {
+            "status": "error",
+            "message": "Auth environment variables not configured"
+        }
+
+    if email != admin_email or password != admin_password:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid credentials"
+        )
+
+    token = create_session_token(email)
+
+    return {
+        "status": "ok",
+        "token": token,
+        "email": email
+    }
 
 # -------------------------------------------------
 # HEALTH CHECK
