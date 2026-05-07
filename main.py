@@ -490,8 +490,8 @@ def init_db(x_admin_key: str = Header(None)):
 # CLIENTS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/clients")
-def get_clients(x_admin_key: str = Header(None)):
-    require_admin(x_admin_key)
+def get_clients(authorization: str = Header(None)):
+    require_auth_token(authorization)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -775,9 +775,9 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
 @app.get("/calls")
 def get_calls(
     client_key: str = Query(None),
-    x_admin_key: str = Header(None)
+    authorization: str = Header(None)
 ):
-    require_admin(x_admin_key)
+    require_auth_token(authorization)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
