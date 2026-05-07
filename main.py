@@ -557,6 +557,56 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                     TWILIO_PHONE
                 ))
 
+                # -------------------------------------------------
+                # CREATE PRIMARY CLIENT CONTACT
+                # -------------------------------------------------
+                if first_name or last_name or email or contact_phone:
+                    cur.execute("""
+                        INSERT INTO client_contacts (
+                            client_key,
+                            first_name,
+                            last_name,
+                            email,
+                            phone,
+                            role,
+                            is_primary
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, TRUE);
+                    """, (
+                        client_key,
+                        first_name,
+                        last_name,
+                        email,
+                        contact_phone,
+                        role
+                    ))
+
+                # -------------------------------------------------
+                # CREATE PRIMARY CLIENT ADDRESS
+                # -------------------------------------------------
+                if address_line_1 or city or state_province or postal_code:
+                    cur.execute("""
+                        INSERT INTO client_addresses (
+                            client_key,
+                            address_line_1,
+                            address_line_2,
+                            city,
+                            state_province,
+                            postal_code,
+                            country,
+                            is_primary
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE);
+                    """, (
+                        client_key,
+                        address_line_1,
+                        address_line_2,
+                        city,
+                        state_province,
+                        postal_code,
+                        country
+                    ))
+
             conn.commit()
 
         return {
@@ -569,7 +619,22 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                 "plan_tier": plan_tier,
                 "inbound_phone": inbound_phone,
                 "business_phone": business_phone,
-                "timezone": timezone
+                "timezone": timezone,
+                "contact": {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": email,
+                    "phone": contact_phone,
+                    "role": role
+                },
+                "address": {
+                    "address_line_1": address_line_1,
+                    "address_line_2": address_line_2,
+                    "city": city,
+                    "state_province": state_province,
+                    "postal_code": postal_code,
+                    "country": country
+                }
             }
         }
 
