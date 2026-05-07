@@ -383,6 +383,138 @@ def get_clients(x_admin_key: str = Header(None)):
 
 
 # -------------------------------------------------
+# CLIENT CREATE ENDPOINT
+# -------------------------------------------------
+@app.post("/clients/create")
+async def create_client(request: Request, x_admin_key: str = Header(None)):
+    require_admin(x_admin_key)
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    data = await request.json()
+
+    client_key = data.get("client_key")
+    business_name = data.get("business_name")
+    vertical = data.get("vertical", "hvac")
+    plan_tier = data.get("plan_tier", "lite")
+    inbound_phone = normalize_phone(data.get("inbound_phone"))
+    business_phone = normalize_phone(data.get("business_phone"))
+    timezone = data.get("timezone", "America/Toronto")
+
+    if not client_key or not business_name:
+        return {
+            "status": "error",
+            "message": "client_key and business_name are required"
+        }
+
+    if not inbound_phone:
+        return {
+            "status": "error",
+            "message": "valid inbound_phone is required"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO clients (
+                        client_key,
+                        business_name,
+                        vertical,
+                        plan_tier,
+                        inbound_phone,
+                        business_phone,
+                        caller_sms_enabled,
+                        status,
+                        timezone
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, TRUE, 'active', %s)
+                    ON CONFLICT (client_key) DO NOTHING;
+                """, (
+                    client_key,
+                    business_name,
+                    vertical,
+                    plan_tier,
+                    inbound_phone,
+                    business_phone,
+                    timezone
+                ))
+
+                client_created = cur.rowcount
+
+                if client_created == 0:
+                    return {
+                        "status": "error",
+                        "message": "client_key already exists",
+                        "client_key": client_key
+                    }
+
+                cur.execute("""
+                    INSERT INTO client_settings (
+                        client_key,
+                        greeting_enabled,
+                        end_call_enabled,
+                        caller_confirmation_enabled,
+                        business_sms_enabled,
+                        caller_sms_enabled,
+                        emergency_detection_enabled,
+                        after_hours_enabled,
+                        calendar_enabled,
+                        crm_enabled,
+                        twilio_inbound_number,
+                        twilio_outbound_number
+                    )
+                    VALUES (
+                        %s,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        TRUE,
+                        FALSE,
+                        FALSE,
+                        FALSE,
+                        %s,
+                        %s
+                    )
+                    ON CONFLICT (client_key) DO NOTHING;
+                """, (
+                    client_key,
+                    inbound_phone,
+                    TWILIO_PHONE
+                ))
+
+            conn.commit()
+
+        return {
+            "status": "ok",
+            "message": "Client created",
+            "client": {
+                "client_key": client_key,
+                "business_name": business_name,
+                "vertical": vertical,
+                "plan_tier": plan_tier,
+                "inbound_phone": inbound_phone,
+                "business_phone": business_phone,
+                "timezone": timezone
+            }
+        }
+
+    except Exception as e:
+        print("[CLIENT CREATE ERROR]", str(e))
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+# -------------------------------------------------
 # CALLS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/calls")
