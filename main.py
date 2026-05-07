@@ -190,6 +190,51 @@ def init_db(x_admin_key: str = Header(None)):
                 """)
 
                 # -------------------------------------------------
+                # CLIENT CONTACTS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS client_contacts (
+                        id SERIAL PRIMARY KEY,
+                        client_key TEXT NOT NULL
+                            REFERENCES clients(client_key)
+                            ON DELETE CASCADE,
+
+                        first_name TEXT,
+                        last_name TEXT,
+                        email TEXT,
+                        phone TEXT,
+                        role TEXT,
+                        is_primary BOOLEAN NOT NULL DEFAULT TRUE,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                # -------------------------------------------------
+                # CLIENT ADDRESSES TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS client_addresses (
+                        id SERIAL PRIMARY KEY,
+                        client_key TEXT NOT NULL
+                            REFERENCES clients(client_key)
+                            ON DELETE CASCADE,
+
+                        address_line_1 TEXT,
+                        address_line_2 TEXT,
+                        city TEXT,
+                        state_province TEXT,
+                        postal_code TEXT,
+                        country TEXT NOT NULL DEFAULT 'CA',
+                        is_primary BOOLEAN NOT NULL DEFAULT TRUE,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                # -------------------------------------------------
                 # CALLS TABLE
                 # -------------------------------------------------
                 cur.execute("""
@@ -299,6 +344,8 @@ def init_db(x_admin_key: str = Header(None)):
             "tables_created": [
                 "clients",
                 "client_settings",
+                "client_contacts",
+                "client_addresses",
                 "calls"
             ],
             "routing_enabled": True,
