@@ -15,7 +15,7 @@ import hmac
 import secrets
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.4")
+app = FastAPI(title="Gosonic MVP API", version="0.2.5")
 
 # -------------------------------------------------
 # LOGGING
@@ -633,10 +633,6 @@ def get_supported_timezones(authorization: str = Header(None)):
 @app.get("/users")
 def get_users(authorization: str = Header(None)):
     payload = require_auth_token(authorization)
-
-    if payload.get("role") != "platform_admin":
-        raise HTTPException(status_code=403, detail="Platform admin access required")
-
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -645,23 +641,65 @@ def get_users(authorization: str = Header(None)):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT
-                        u.id,
-                        u.client_key,
-                        u.full_name,
-                        u.email,
-                        u.role,
-                        u.status,
-                        u.last_login_at,
-                        u.created_at,
-                        u.updated_at,
-                        c.business_name,
-                        c.timezone
-                    FROM users u
-                    LEFT JOIN clients c ON c.client_key = u.client_key
-                    ORDER BY u.created_at ASC;
-                """)
+                if is_platform_admin(payload):
+                    cur.execute("""
+                        SELECT
+                            u.id,
+                            u.client_key,
+                            u.full_name,
+                            u.email,
+                            u.role,
+                            u.status,
+                            u.last_login_at,
+                            u.created_at,
+                            u.updated_at,
+                            c.business_name,
+                            c.timezone
+                        FROM users u
+                        LEFT JOIN clients c ON c.client_key = u.client_key
+                        ORDER BY u.created_at ASC;
+                    """)
+                elif payload.get("role") == "client_admin":
+                    effective_client_key = resolve_effective_client_key(payload)
+                    cur.execute("""
+                        SELECT
+                            u.id,
+                            u.client_key,
+                            u.full_name,
+                            u.email,
+                            u.role,
+                            u.status,
+                            u.last_login_at,
+                            u.created_at,
+                            u.updated_at,
+                            c.business_name,
+                            c.timezone
+                        FROM users u
+                        LEFT JOIN clients c ON c.client_key = u.client_key
+                        WHERE u.client_key = %s
+                        ORDER BY u.created_at ASC;
+                    """, (effective_client_key,))
+                elif payload.get("role") == "client_user":
+                    cur.execute("""
+                        SELECT
+                            u.id,
+                            u.client_key,
+                            u.full_name,
+                            u.email,
+                            u.role,
+                            u.status,
+                            u.last_login_at,
+                            u.created_at,
+                            u.updated_at,
+                            c.business_name,
+                            c.timezone
+                        FROM users u
+                        LEFT JOIN clients c ON c.client_key = u.client_key
+                        WHERE u.id = %s
+                        LIMIT 1;
+                    """, (payload.get("user_id"),))
+                else:
+                    raise HTTPException(status_code=403, detail="Unsupported user role")
 
                 rows = cur.fetchall()
 
@@ -683,7 +721,15 @@ def get_users(authorization: str = Header(None)):
                 "timezone_label": timezone_label(row[10])
             })
 
-        return {"status": "ok", "count": len(users), "users": users}
+        return {
+            "status": "ok",
+            "count": len(users),
+            "scope": "platform" if is_platform_admin(payload) else payload.get("client_key"),
+            "users": users
+        }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("Users read failed")
@@ -704,6 +750,71 @@ def require_platform_admin_payload(authorization: str):
         raise HTTPException(status_code=403, detail="Platform admin access required")
 
     return payload
+
+
+def is_platform_admin(payload: dict):
+    return payload.get("role") == "platform_admin"
+
+
+def is_client_role(payload: dict):
+    return payload.get("role") in {"client_admin", "client_user"}
+
+
+def require_client_scoped_payload(authorization: str):
+    payload = require_auth_token(authorization)
+
+    if not is_client_role(payload):
+        raise HTTPException(status_code=403, detail="Client account access required")
+
+    if not payload.get("client_key"):
+        raise HTTPException(status_code=403, detail="Client account is not scoped to a client")
+
+    return payload
+
+
+def resolve_effective_client_key(payload: dict, requested_client_key: str = None):
+    """
+    Central tenant isolation guard.
+
+    platform_admin: may request any client_key or omit it for global access.
+    client_admin/client_user: always limited to their own client_key.
+    """
+    requested_client_key = (requested_client_key or "").strip() or None
+
+    if is_platform_admin(payload):
+        return requested_client_key
+
+    if not is_client_role(payload):
+        raise HTTPException(status_code=403, detail="Unsupported user role")
+
+    user_client_key = payload.get("client_key")
+
+    if not user_client_key:
+        raise HTTPException(status_code=403, detail="User is not assigned to a client")
+
+    if requested_client_key and requested_client_key != user_client_key:
+        raise HTTPException(status_code=403, detail="Access denied for requested client")
+
+    return user_client_key
+
+
+def require_client_admin_or_platform(payload: dict, client_key: str = None):
+    effective_client_key = resolve_effective_client_key(payload, client_key)
+
+    if is_platform_admin(payload):
+        return effective_client_key
+
+    if payload.get("role") != "client_admin":
+        raise HTTPException(status_code=403, detail="Client admin access required")
+
+    return effective_client_key
+
+
+def scoped_where_clause(table_alias: str, effective_client_key: str):
+    if effective_client_key:
+        return f"WHERE {table_alias}.client_key = %s", [effective_client_key]
+
+    return "", []
 
 
 def normalize_email(value: str):
@@ -1363,8 +1474,12 @@ def init_db(x_admin_key: str = Header(None)):
 # CLIENTS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/clients")
-def get_clients(authorization: str = Header(None)):
-    require_auth_token(authorization)
+def get_clients(
+    client_key: str = Query(None),
+    authorization: str = Header(None)
+):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -1376,7 +1491,8 @@ def get_clients(authorization: str = Header(None)):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                where_sql, params = scoped_where_clause("clients", effective_client_key)
+                cur.execute(f"""
                     SELECT
                         client_key,
                         business_name,
@@ -1390,8 +1506,9 @@ def get_clients(authorization: str = Header(None)):
                         created_at,
                         updated_at
                     FROM clients
+                    {where_sql}
                     ORDER BY created_at ASC;
-                """)
+                """, params)
 
                 rows = cur.fetchall()
 
@@ -1416,8 +1533,13 @@ def get_clients(authorization: str = Header(None)):
         return {
             "status": "ok",
             "count": len(clients),
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
             "clients": clients
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("Clients read failed")
@@ -1651,7 +1773,8 @@ def get_calls(
     client_key: str = Query(None),
     authorization: str = Header(None)
 ):
-    require_auth_token(authorization)
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -1663,52 +1786,29 @@ def get_calls(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-
-                if client_key:
-                    cur.execute("""
-                        SELECT
-                            call_id,
-                            client_key,
-                            caller_name,
-                            caller_phone,
-                            service_address,
-                            issue_description,
-                            issue_type,
-                            urgency,
-                            call_outcome,
-                            sms_policy_reason,
-                            business_notified,
-                            business_error,
-                            caller_notified,
-                            caller_error,
-                            created_at
-                        FROM calls
-                        WHERE client_key = %s
-                        ORDER BY created_at DESC
-                        LIMIT 50;
-                    """, (client_key,))
-                else:
-                    cur.execute("""
-                        SELECT
-                            call_id,
-                            client_key,
-                            caller_name,
-                            caller_phone,
-                            service_address,
-                            issue_description,
-                            issue_type,
-                            urgency,
-                            call_outcome,
-                            sms_policy_reason,
-                            business_notified,
-                            business_error,
-                            caller_notified,
-                            caller_error,
-                            created_at
-                        FROM calls
-                        ORDER BY created_at DESC
-                        LIMIT 50;
-                    """)
+                where_sql, params = scoped_where_clause("calls", effective_client_key)
+                cur.execute(f"""
+                    SELECT
+                        call_id,
+                        client_key,
+                        caller_name,
+                        caller_phone,
+                        service_address,
+                        issue_description,
+                        issue_type,
+                        urgency,
+                        call_outcome,
+                        sms_policy_reason,
+                        business_notified,
+                        business_error,
+                        caller_notified,
+                        caller_error,
+                        created_at
+                    FROM calls
+                    {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT 50;
+                """, params)
 
                 rows = cur.fetchall()
 
@@ -1736,9 +1836,13 @@ def get_calls(
         return {
             "status": "ok",
             "count": len(calls),
-            "client_key_filter": client_key,
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
             "calls": calls
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("Calls read failed")
@@ -1751,8 +1855,12 @@ def get_calls(
 # CLIENT SETTINGS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/client-settings")
-def get_client_settings(x_admin_key: str = Header(None)):
-    require_admin(x_admin_key)
+def get_client_settings(
+    client_key: str = Query(None),
+    authorization: str = Header(None)
+):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -1764,7 +1872,8 @@ def get_client_settings(x_admin_key: str = Header(None)):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                where_sql, params = scoped_where_clause("client_settings", effective_client_key)
+                cur.execute(f"""
                     SELECT
                         client_key,
                         greeting_enabled,
@@ -1784,8 +1893,9 @@ def get_client_settings(x_admin_key: str = Header(None)):
                         created_at,
                         updated_at
                     FROM client_settings
+                    {where_sql}
                     ORDER BY created_at ASC;
-                """)
+                """, params)
 
                 rows = cur.fetchall()
 
@@ -1815,8 +1925,13 @@ def get_client_settings(x_admin_key: str = Header(None)):
         return {
             "status": "ok",
             "count": len(settings),
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
             "client_settings": settings
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("Client settings read failed")
@@ -1831,9 +1946,10 @@ def get_client_settings(x_admin_key: str = Header(None)):
 @app.get("/client-contacts")
 def get_client_contacts(
     client_key: str = Query(None),
-    x_admin_key: str = Header(None)
+    authorization: str = Header(None)
 ):
-    require_admin(x_admin_key)
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -1842,19 +1958,13 @@ def get_client_contacts(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                if client_key:
-                    cur.execute("""
-                        SELECT client_key, first_name, last_name, email, phone, role, is_primary, created_at, updated_at
-                        FROM client_contacts
-                        WHERE client_key = %s
-                        ORDER BY created_at DESC;
-                    """, (client_key,))
-                else:
-                    cur.execute("""
-                        SELECT client_key, first_name, last_name, email, phone, role, is_primary, created_at, updated_at
-                        FROM client_contacts
-                        ORDER BY created_at DESC;
-                    """)
+                where_sql, params = scoped_where_clause("client_contacts", effective_client_key)
+                cur.execute(f"""
+                    SELECT client_key, first_name, last_name, email, phone, role, is_primary, created_at, updated_at
+                    FROM client_contacts
+                    {where_sql}
+                    ORDER BY created_at DESC;
+                """, params)
 
                 rows = cur.fetchall()
 
@@ -1873,9 +1983,13 @@ def get_client_contacts(
         return {
             "status": "ok",
             "count": len(contacts),
-            "client_key_filter": client_key,
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
             "contacts": contacts
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("Client contacts read failed")
@@ -1887,9 +2001,10 @@ def get_client_contacts(
 @app.get("/client-addresses")
 def get_client_addresses(
     client_key: str = Query(None),
-    x_admin_key: str = Header(None)
+    authorization: str = Header(None)
 ):
-    require_admin(x_admin_key)
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -1898,39 +2013,23 @@ def get_client_addresses(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                if client_key:
-                    cur.execute("""
-                        SELECT
-                            client_key,
-                            address_line_1,
-                            address_line_2,
-                            city,
-                            state_province,
-                            postal_code,
-                            country,
-                            is_primary,
-                            created_at,
-                            updated_at
-                        FROM client_addresses
-                        WHERE client_key = %s
-                        ORDER BY created_at DESC;
-                    """, (client_key,))
-                else:
-                    cur.execute("""
-                        SELECT
-                            client_key,
-                            address_line_1,
-                            address_line_2,
-                            city,
-                            state_province,
-                            postal_code,
-                            country,
-                            is_primary,
-                            created_at,
-                            updated_at
-                        FROM client_addresses
-                        ORDER BY created_at DESC;
-                    """)
+                where_sql, params = scoped_where_clause("client_addresses", effective_client_key)
+                cur.execute(f"""
+                    SELECT
+                        client_key,
+                        address_line_1,
+                        address_line_2,
+                        city,
+                        state_province,
+                        postal_code,
+                        country,
+                        is_primary,
+                        created_at,
+                        updated_at
+                    FROM client_addresses
+                    {where_sql}
+                    ORDER BY created_at DESC;
+                """, params)
 
                 rows = cur.fetchall()
 
@@ -1953,9 +2052,13 @@ def get_client_addresses(
         return {
             "status": "ok",
             "count": len(addresses),
-            "client_key_filter": client_key,
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
             "addresses": addresses
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("Client addresses read failed")
@@ -1965,8 +2068,8 @@ def get_client_addresses(
 # CLIENT SETTINGS UPDATE ENDPOINT
 # -------------------------------------------------
 @app.post("/client-settings/update-sms-number")
-async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
-    require_admin(x_admin_key)
+async def update_sms_number(request: Request, authorization: str = Header(None)):
+    payload = require_auth_token(authorization)
 
     database_url = os.getenv("DATABASE_URL")
 
@@ -1978,7 +2081,8 @@ async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
 
     data = await request.json()
 
-    client_key = data.get("client_key")
+    requested_client_key = (data.get("client_key") or "").strip()
+    client_key = require_client_admin_or_platform(payload, requested_client_key)
     twilio_outbound_number = normalize_phone(data.get("twilio_outbound_number"))
 
     if not client_key or not twilio_outbound_number:
@@ -2001,13 +2105,21 @@ async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
                     client_key
                 ))
 
+                updated = cur.rowcount
+
             conn.commit()
+
+        if updated == 0:
+            raise HTTPException(status_code=404, detail="client_settings record not found")
 
         return {
             "status": "ok",
             "client_key": client_key,
             "twilio_outbound_number": twilio_outbound_number
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("SMS number update failed")
@@ -2020,8 +2132,8 @@ async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
 # CLIENT SMS SETTINGS UPDATE ENDPOINT
 # -------------------------------------------------
 @app.post("/client-settings/update-sms-settings")
-async def update_sms_settings(request: Request, x_admin_key: str = Header(None)):
-    require_admin(x_admin_key)
+async def update_sms_settings(request: Request, authorization: str = Header(None)):
+    payload = require_auth_token(authorization)
 
     database_url = os.getenv("DATABASE_URL")
 
@@ -2033,7 +2145,8 @@ async def update_sms_settings(request: Request, x_admin_key: str = Header(None))
 
     data = await request.json()
 
-    client_key = data.get("client_key")
+    requested_client_key = (data.get("client_key") or "").strip()
+    client_key = require_client_admin_or_platform(payload, requested_client_key)
     business_sms_enabled = data.get("business_sms_enabled")
     caller_sms_enabled = data.get("caller_sms_enabled")
 
@@ -2082,6 +2195,9 @@ async def update_sms_settings(request: Request, x_admin_key: str = Header(None))
             "business_sms_enabled": business_sms_enabled,
             "caller_sms_enabled": caller_sms_enabled
         }
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.exception("SMS settings update failed")
@@ -2698,6 +2814,9 @@ async def inbound_webhook(
             }
         }
 
+    except HTTPException:
+        raise
+
     except Exception as e:
         logger.exception("Inbound webhook failed")
 
@@ -2792,11 +2911,12 @@ async def call_summary(
 
     try:
         raw_body = (await request.body()).decode("utf-8")
-        observe_retell_signature(
+        verify_retell_signature(
             raw_body,
             x_retell_signature,
-            label="[RETELL CALL SUMMARY SIGNATURE]"
+            enforce_env="RETELL_VERIFY_CALL_SUMMARY_SIGNATURE"
         )
+        logger.info("[RETELL CALL SUMMARY SIGNATURE] Verified")
         data = json.loads(raw_body or "{}")
 
         cleanup_state()
