@@ -1969,11 +1969,12 @@ async def inbound_webhook(
 
     try:
         raw_body = (await request.body()).decode("utf-8")
-        observe_retell_signature(
+        verify_retell_signature(
             raw_body,
             x_retell_signature,
-            label="[RETELL INBOUND SIGNATURE]"
+            enforce_env="RETELL_VERIFY_INBOUND_SIGNATURE"
         )
+        logger.info("[RETELL INBOUND SIGNATURE] Verified")
         data = json.loads(raw_body or "{}")
 
         call_inbound = data.get("call_inbound") or {}
