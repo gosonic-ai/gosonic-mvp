@@ -15,7 +15,7 @@ import hmac
 import secrets
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.3")
+app = FastAPI(title="Gosonic MVP API", version="0.2.4")
 
 # -------------------------------------------------
 # LOGGING
@@ -687,6 +687,309 @@ def get_users(authorization: str = Header(None)):
 
     except Exception as e:
         logger.exception("Users read failed")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
+# USER MANAGEMENT HELPERS
+# -------------------------------------------------
+ALLOWED_USER_ROLES = {"platform_admin", "client_admin", "client_user"}
+ALLOWED_USER_STATUSES = {"active", "inactive"}
+
+
+def require_platform_admin_payload(authorization: str):
+    payload = require_auth_token(authorization)
+
+    if payload.get("role") != "platform_admin":
+        raise HTTPException(status_code=403, detail="Platform admin access required")
+
+    return payload
+
+
+def normalize_email(value: str):
+    email = (value or "").strip().lower()
+
+    if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return None
+
+    return email
+
+
+def validate_password_strength(password: str):
+    if not password or len(password) < 12:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 12 characters"
+        )
+
+    return True
+
+
+def client_exists(client_key: str):
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url or not client_key:
+        return False
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT 1
+                    FROM clients
+                    WHERE client_key = %s
+                    LIMIT 1;
+                """, (client_key,))
+
+                return cur.fetchone() is not None
+
+    except Exception:
+        logger.exception("Client existence check failed")
+        return False
+
+
+def build_user_response(row):
+    return {
+        "user_id": row[0],
+        "client_key": row[1],
+        "full_name": row[2],
+        "email": row[3],
+        "role": row[4],
+        "status": row[5],
+        "last_login_at": row[6].isoformat() if row[6] else None,
+        "created_at": row[7].isoformat() if row[7] else None,
+        "updated_at": row[8].isoformat() if row[8] else None,
+        "business_name": row[9],
+        "timezone": row[10],
+        "timezone_label": timezone_label(row[10])
+    }
+
+
+# -------------------------------------------------
+# USER CREATE ENDPOINT
+# -------------------------------------------------
+@app.post("/users/create")
+async def create_user(request: Request, authorization: str = Header(None)):
+    require_platform_admin_payload(authorization)
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    data = await request.json()
+
+    full_name = (data.get("full_name") or "").strip()
+    email = normalize_email(data.get("email"))
+    password = data.get("password") or ""
+    role = (data.get("role") or "client_admin").strip()
+    status = (data.get("status") or "active").strip()
+    client_key = (data.get("client_key") or "").strip() or None
+
+    if not full_name:
+        raise HTTPException(status_code=400, detail="full_name is required")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="valid email is required")
+
+    if role not in ALLOWED_USER_ROLES:
+        raise HTTPException(status_code=400, detail="invalid role")
+
+    if status not in ALLOWED_USER_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid status")
+
+    validate_password_strength(password)
+
+    if role in {"client_admin", "client_user"}:
+        if not client_key:
+            raise HTTPException(status_code=400, detail="client_key is required for client users")
+
+        if not client_exists(client_key):
+            raise HTTPException(status_code=404, detail="client_key not found")
+
+    if role == "platform_admin":
+        client_key = None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (
+                        client_key,
+                        full_name,
+                        email,
+                        password_hash,
+                        role,
+                        status
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id;
+                """, (
+                    client_key,
+                    full_name,
+                    email,
+                    hash_password(password),
+                    role,
+                    status
+                ))
+
+                created = cur.fetchone()
+
+                cur.execute("""
+                    SELECT
+                        u.id,
+                        u.client_key,
+                        u.full_name,
+                        u.email,
+                        u.role,
+                        u.status,
+                        u.last_login_at,
+                        u.created_at,
+                        u.updated_at,
+                        c.business_name,
+                        c.timezone
+                    FROM users u
+                    LEFT JOIN clients c ON c.client_key = u.client_key
+                    WHERE u.id = %s
+                    LIMIT 1;
+                """, (created[0],))
+
+                row = cur.fetchone()
+
+            conn.commit()
+
+        logger.info("[USER CREATED] user_id=%s role=%s client_key=%s", row[0], role, client_key)
+
+        return {
+            "status": "ok",
+            "message": "User created",
+            "user": build_user_response(row)
+        }
+
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(status_code=409, detail="email already exists")
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("User create failed")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
+# USER STATUS UPDATE ENDPOINT
+# -------------------------------------------------
+@app.post("/users/update-status")
+async def update_user_status(request: Request, authorization: str = Header(None)):
+    require_platform_admin_payload(authorization)
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    data = await request.json()
+
+    user_id = data.get("user_id")
+    status = (data.get("status") or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    if status not in ALLOWED_USER_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid status")
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users
+                    SET
+                        status = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id;
+                """, (status, user_id))
+
+                updated = cur.fetchone()
+
+            conn.commit()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        logger.info("[USER STATUS UPDATED] user_id=%s status=%s", user_id, status)
+
+        return {
+            "status": "ok",
+            "message": "User status updated",
+            "user_id": user_id,
+            "user_status": status
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("User status update failed")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
+# USER PASSWORD RESET ENDPOINT
+# -------------------------------------------------
+@app.post("/users/reset-password")
+async def reset_user_password(request: Request, authorization: str = Header(None)):
+    require_platform_admin_payload(authorization)
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    data = await request.json()
+
+    user_id = data.get("user_id")
+    new_password = data.get("password") or ""
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    validate_password_strength(new_password)
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users
+                    SET
+                        password_hash = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id;
+                """, (hash_password(new_password), user_id))
+
+                updated = cur.fetchone()
+
+            conn.commit()
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        logger.info("[USER PASSWORD RESET] user_id=%s", user_id)
+
+        return {
+            "status": "ok",
+            "message": "User password updated",
+            "user_id": user_id
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("User password reset failed")
         return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
