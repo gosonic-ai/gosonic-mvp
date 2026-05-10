@@ -137,6 +137,50 @@ def verify_retell_signature(raw_body: str, signature: str, enforce_env: str = "R
     logger.info("[RETELL SIGNATURE] Verified")
     return True
 
+
+
+def observe_retell_signature(raw_body: str, signature: str, label: str = "[RETELL SIGNATURE OBSERVE]"):
+    """
+    Passive Retell signature check for endpoints we are not enforcing yet.
+
+    This never blocks request processing. It only logs whether Retell is
+    sending X-Retell-Signature and whether verification succeeds.
+    """
+    api_key = os.getenv("RETELL_API_KEY")
+
+    if not signature:
+        logger.info("%s Missing X-Retell-Signature", label)
+        return {"present": False, "valid": None, "reason": "missing_signature"}
+
+    if not api_key:
+        logger.warning("%s RETELL_API_KEY not configured", label)
+        return {"present": True, "valid": None, "reason": "missing_api_key"}
+
+    try:
+        from retell import Retell
+
+        retell_client = Retell(api_key=api_key)
+        valid_signature = retell_client.verify(
+            raw_body,
+            api_key=str(api_key),
+            signature=str(signature),
+        )
+
+    except ImportError:
+        logger.error("%s retell package not installed", label)
+        return {"present": True, "valid": None, "reason": "retell_sdk_missing"}
+
+    except Exception:
+        logger.exception("%s Verification error", label)
+        return {"present": True, "valid": False, "reason": "verification_error"}
+
+    if valid_signature:
+        logger.info("%s Verified", label)
+        return {"present": True, "valid": True, "reason": "verified"}
+
+    logger.warning("%s Invalid signature", label)
+    return {"present": True, "valid": False, "reason": "invalid_signature"}
+
 def mask_phone(phone: str):
     if not phone:
         return None
@@ -2056,11 +2100,21 @@ async def triage(
 # CALL SUMMARY WEBHOOK
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
-async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
+async def call_summary(
+    request: Request,
+    x_webhook_secret: str = Header(None),
+    x_retell_signature: str = Header(None)
+):
     require_webhook_secret(x_webhook_secret)
 
     try:
-        data = await request.json()
+        raw_body = (await request.body()).decode("utf-8")
+        observe_retell_signature(
+            raw_body,
+            x_retell_signature,
+            label="[RETELL CALL SUMMARY SIGNATURE]"
+        )
+        data = json.loads(raw_body or "{}")
 
         cleanup_state()
 
