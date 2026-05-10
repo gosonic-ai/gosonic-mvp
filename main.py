@@ -10,6 +10,9 @@ import time
 import re
 import logging
 import json
+import hashlib
+import hmac
+import secrets
 
 
 app = FastAPI(title="Gosonic MVP API", version="0.2.3")
@@ -29,6 +32,34 @@ logging.getLogger("twilio.http_client").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 LOG_SENSITIVE_DATA = os.getenv("LOG_SENSITIVE_DATA", "false").lower() == "true"
+
+# -------------------------------------------------
+# PLATFORM TIMEZONES
+# -------------------------------------------------
+# Store IANA timezone names in the database. Display friendly labels in the dashboard.
+SUPPORTED_TIMEZONES = {
+    "America/New_York": "Eastern Time",
+    "America/Chicago": "Central Time",
+    "America/Denver": "Mountain Time",
+    "America/Phoenix": "Mountain Time — Arizona",
+    "America/Los_Angeles": "Pacific Time",
+    "America/Anchorage": "Alaska Time",
+    "Pacific/Honolulu": "Hawaii Time",
+    "America/Toronto": "Eastern Time — Toronto",
+    "America/Vancouver": "Pacific Time — Vancouver",
+}
+
+DEFAULT_CLIENT_TIMEZONE = os.getenv("DEFAULT_CLIENT_TIMEZONE", "America/New_York")
+
+
+def normalize_timezone(value: str):
+    if value in SUPPORTED_TIMEZONES:
+        return value
+    return DEFAULT_CLIENT_TIMEZONE if DEFAULT_CLIENT_TIMEZONE in SUPPORTED_TIMEZONES else "America/New_York"
+
+
+def timezone_label(value: str):
+    return SUPPORTED_TIMEZONES.get(value, value or "Unknown")
 
 
 # -------------------------------------------------
@@ -273,9 +304,52 @@ CALL_PHONE_MAP = {}
 CALL_PHONE_META = {}
 
 # -------------------------------------------------
-# CREATE SESSION TOKEN
+# PASSWORD + SESSION HELPERS
 # -------------------------------------------------
-def create_session_token(email: str):
+def hash_password(password: str):
+    """
+    PBKDF2 password hashing using the Python standard library.
+    Format: pbkdf2_sha256$iterations$salt$hash
+    """
+    if not password:
+        return None
+
+    iterations = 260000
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations
+    ).hex()
+
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
+
+def verify_password(password: str, password_hash: str):
+    if not password or not password_hash:
+        return False
+
+    try:
+        algorithm, iterations, salt, expected_digest = password_hash.split("$", 3)
+
+        if algorithm != "pbkdf2_sha256":
+            return False
+
+        candidate_digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations)
+        ).hex()
+
+        return hmac.compare_digest(candidate_digest, expected_digest)
+
+    except Exception:
+        return False
+
+
+def create_session_token(user_profile: dict):
     session_secret = os.getenv("SESSION_SECRET")
 
     if not session_secret:
@@ -285,7 +359,13 @@ def create_session_token(email: str):
         )
 
     payload = {
-        "email": email,
+        "email": user_profile.get("email"),
+        "user_id": user_profile.get("user_id"),
+        "client_key": user_profile.get("client_key"),
+        "role": user_profile.get("role"),
+        "full_name": user_profile.get("full_name"),
+        "business_name": user_profile.get("business_name"),
+        "timezone": user_profile.get("timezone"),
         "exp": datetime.now(timezone.utc) + timedelta(hours=12)
     }
 
@@ -297,6 +377,108 @@ def create_session_token(email: str):
 
     return token
 
+
+def get_user_by_email(email: str):
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url or not email:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        u.id,
+                        u.client_key,
+                        u.full_name,
+                        u.email,
+                        u.password_hash,
+                        u.role,
+                        u.status,
+                        u.last_login_at,
+                        c.business_name,
+                        c.timezone
+                    FROM users u
+                    LEFT JOIN clients c ON c.client_key = u.client_key
+                    WHERE LOWER(u.email) = LOWER(%s)
+                    LIMIT 1;
+                """, (email,))
+
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "user_id": row[0],
+            "client_key": row[1],
+            "full_name": row[2],
+            "email": row[3],
+            "password_hash": row[4],
+            "role": row[5],
+            "status": row[6],
+            "last_login_at": row[7],
+            "business_name": row[8],
+            "timezone": row[9],
+            "timezone_label": timezone_label(row[9]),
+            "auth_source": "database"
+        }
+
+    except Exception as e:
+        # Users table may not exist until the next /init-db migration is run.
+        logger.warning("[AUTH DB LOOKUP SKIPPED] %s", str(e))
+        return None
+
+
+def update_user_last_login(user_id: int):
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url or not user_id:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users
+                    SET
+                        last_login_at = NOW(),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING last_login_at;
+                """, (user_id,))
+
+                row = cur.fetchone()
+
+            conn.commit()
+
+        return row[0] if row else None
+
+    except Exception:
+        logger.exception("[AUTH LAST LOGIN UPDATE FAILED]")
+        return None
+
+
+def fallback_env_admin_user(email: str):
+    admin_email = os.getenv("ADMIN_EMAIL")
+
+    if not admin_email or email != admin_email:
+        return None
+
+    return {
+        "user_id": None,
+        "client_key": None,
+        "full_name": os.getenv("ADMIN_FULL_NAME", "Gosonic Admin"),
+        "email": admin_email,
+        "role": "platform_admin",
+        "status": "active",
+        "last_login_at": None,
+        "business_name": os.getenv("ADMIN_COMPANY_NAME", "Gosonic"),
+        "timezone": DEFAULT_CLIENT_TIMEZONE,
+        "timezone_label": timezone_label(DEFAULT_CLIENT_TIMEZONE),
+        "auth_source": "environment"
+    }
 
 # -------------------------------------------------
 # REQUIRE AUTH TOKEN
@@ -347,30 +529,63 @@ def require_auth_token(authorization: str):
 async def auth_login(request: Request):
     data = await request.json()
 
-    email = data.get("email")
-    password = data.get("password")
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
 
-    admin_email = os.getenv("ADMIN_EMAIL")
-    admin_password = os.getenv("ADMIN_PASSWORD")
-
-    if not admin_email or not admin_password:
-        return {
-            "status": "error",
-            "message": "Auth environment variables not configured"
-        }
-
-    if email != admin_email or password != admin_password:
+    if not email or not password:
         raise HTTPException(
             status_code=401,
             detail="Invalid credentials"
         )
 
-    token = create_session_token(email)
+    user = get_user_by_email(email)
+
+    if user:
+        if user.get("status") != "active":
+            raise HTTPException(
+                status_code=403,
+                detail="User account is inactive"
+            )
+
+        if not verify_password(password, user.get("password_hash")):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials"
+            )
+
+        last_login_at = update_user_last_login(user.get("user_id"))
+        if last_login_at:
+            user["last_login_at"] = last_login_at
+
+    else:
+        # Temporary fallback for platform access until all dashboard users are migrated.
+        admin_password = os.getenv("ADMIN_PASSWORD")
+        user = fallback_env_admin_user(email)
+
+        if not user or not admin_password or password != admin_password:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials"
+            )
+
+    token = create_session_token(user)
 
     return {
         "status": "ok",
         "token": token,
-        "email": email
+        "user": {
+            "user_id": user.get("user_id"),
+            "client_key": user.get("client_key"),
+            "full_name": user.get("full_name"),
+            "email": user.get("email"),
+            "role": user.get("role"),
+            "business_name": user.get("business_name"),
+            "timezone": user.get("timezone"),
+            "timezone_label": user.get("timezone_label"),
+            "last_login_at": user.get("last_login_at").isoformat() if user.get("last_login_at") else None,
+            "auth_source": user.get("auth_source")
+        },
+        "email": user.get("email")
     }
 
 # -------------------------------------------------
@@ -383,9 +598,96 @@ def auth_me(authorization: str = Header(None)):
     return {
         "status": "ok",
         "authenticated": True,
+        "user": {
+            "user_id": payload.get("user_id"),
+            "client_key": payload.get("client_key"),
+            "full_name": payload.get("full_name"),
+            "email": payload.get("email"),
+            "role": payload.get("role"),
+            "business_name": payload.get("business_name"),
+            "timezone": payload.get("timezone"),
+            "timezone_label": timezone_label(payload.get("timezone"))
+        },
         "email": payload.get("email")
     }
 
+# -------------------------------------------------
+# SUPPORTED TIMEZONES
+# -------------------------------------------------
+@app.get("/timezones")
+def get_supported_timezones(authorization: str = Header(None)):
+    require_auth_token(authorization)
+
+    return {
+        "status": "ok",
+        "default_timezone": DEFAULT_CLIENT_TIMEZONE,
+        "timezones": [
+            {"value": key, "label": label}
+            for key, label in SUPPORTED_TIMEZONES.items()
+        ]
+    }
+
+# -------------------------------------------------
+# USERS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/users")
+def get_users(authorization: str = Header(None)):
+    payload = require_auth_token(authorization)
+
+    if payload.get("role") != "platform_admin":
+        raise HTTPException(status_code=403, detail="Platform admin access required")
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        u.id,
+                        u.client_key,
+                        u.full_name,
+                        u.email,
+                        u.role,
+                        u.status,
+                        u.last_login_at,
+                        u.created_at,
+                        u.updated_at,
+                        c.business_name,
+                        c.timezone
+                    FROM users u
+                    LEFT JOIN clients c ON c.client_key = u.client_key
+                    ORDER BY u.created_at ASC;
+                """)
+
+                rows = cur.fetchall()
+
+        users = []
+
+        for row in rows:
+            users.append({
+                "user_id": row[0],
+                "client_key": row[1],
+                "full_name": row[2],
+                "email": row[3],
+                "role": row[4],
+                "status": row[5],
+                "last_login_at": row[6].isoformat() if row[6] else None,
+                "created_at": row[7].isoformat() if row[7] else None,
+                "updated_at": row[8].isoformat() if row[8] else None,
+                "business_name": row[9],
+                "timezone": row[10],
+                "timezone_label": timezone_label(row[10])
+            })
+
+        return {"status": "ok", "count": len(users), "users": users}
+
+    except Exception as e:
+        logger.exception("Users read failed")
+        return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
 # HEALTH CHECK
@@ -469,7 +771,7 @@ def init_db(x_admin_key: str = Header(None)):
                         business_phone TEXT,
                         caller_sms_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                         status TEXT NOT NULL DEFAULT 'active',
-                        timezone TEXT NOT NULL DEFAULT 'America/Toronto',
+                        timezone TEXT NOT NULL DEFAULT 'America/New_York',
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
@@ -558,6 +860,34 @@ def init_db(x_admin_key: str = Header(None)):
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                """)
+
+                # -------------------------------------------------
+                # USERS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        id SERIAL PRIMARY KEY,
+                        client_key TEXT REFERENCES clients(client_key) ON DELETE SET NULL,
+                        full_name TEXT NOT NULL,
+                        email TEXT UNIQUE NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'client_admin',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        last_login_at TIMESTAMPTZ,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_users_client_key
+                    ON users(client_key);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_users_email_lower
+                    ON users(LOWER(email));
                 """)
 
                 # -------------------------------------------------
@@ -662,6 +992,43 @@ def init_db(x_admin_key: str = Header(None)):
                     DO NOTHING;
                 """)
 
+                # -------------------------------------------------
+                # SEED PLATFORM ADMIN USER FROM ENVIRONMENT
+                # -------------------------------------------------
+                admin_email = os.getenv("ADMIN_EMAIL")
+                admin_password = os.getenv("ADMIN_PASSWORD")
+                admin_full_name = os.getenv("ADMIN_FULL_NAME", "Gosonic Admin")
+
+                if admin_email and admin_password:
+                    cur.execute("""
+                        SELECT id
+                        FROM users
+                        WHERE LOWER(email) = LOWER(%s)
+                        LIMIT 1;
+                    """, (admin_email,))
+
+                    existing_user = cur.fetchone()
+
+                    if not existing_user:
+                        cur.execute("""
+                            INSERT INTO users (
+                                client_key,
+                                full_name,
+                                email,
+                                password_hash,
+                                role,
+                                status
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s);
+                        """, (
+                            None,
+                            admin_full_name,
+                            admin_email.lower(),
+                            hash_password(admin_password),
+                            "platform_admin",
+                            "active"
+                        ))
+
             conn.commit()
 
         return {
@@ -672,6 +1039,7 @@ def init_db(x_admin_key: str = Header(None)):
                 "client_settings",
                 "client_contacts",
                 "client_addresses",
+                "users",
                 "calls"
             ],
             "routing_enabled": True,
@@ -737,6 +1105,7 @@ def get_clients(authorization: str = Header(None)):
                 "caller_sms_enabled": row[6],
                 "status": row[7],
                 "timezone": row[8],
+                "timezone_label": timezone_label(row[8]),
                 "created_at": row[9].isoformat() if row[9] else None,
                 "updated_at": row[10].isoformat() if row[10] else None
             })
@@ -778,7 +1147,7 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
     plan_tier = data.get("plan_tier", "lite")
     inbound_phone = normalize_phone(data.get("inbound_phone"))
     business_phone = normalize_phone(data.get("business_phone"))
-    timezone = data.get("timezone", "America/Toronto")
+    timezone = normalize_timezone(data.get("timezone"))
 
     # -------------------------------------------------
     # CONTACT FIELDS
