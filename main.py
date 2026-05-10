@@ -8,8 +8,20 @@ import jwt
 import os
 import time
 import re
+import logging
 
-app = FastAPI()
+
+app = FastAPI(title="Gosonic MVP API", version="0.2.0")
+
+# -------------------------------------------------
+# LOGGING
+# -------------------------------------------------
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+logger = logging.getLogger("gosonic")
+
 
 # -------------------------------------------------
 # CORS CONFIGURATION
@@ -17,7 +29,9 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://client.gosonic.com"
+        origin.strip()
+        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "https://client.gosonic.com").split(",")
+        if origin.strip()
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -45,6 +59,55 @@ def require_admin(x_admin_key: str):
     return True
 
 
+def require_webhook_secret(x_webhook_secret: str):
+    """
+    Optional shared-secret protection for Retell-facing webhooks.
+
+    Set WEBHOOK_SHARED_SECRET in Render and pass the same value from Retell
+    as the X-Webhook-Secret header. If WEBHOOK_SHARED_SECRET is not set,
+    this check is skipped to avoid breaking the current MVP flow.
+    """
+    expected_secret = os.getenv("WEBHOOK_SHARED_SECRET")
+
+    if not expected_secret:
+        return True
+
+    if not x_webhook_secret or x_webhook_secret != expected_secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook secret"
+        )
+
+    return True
+
+
+def mask_phone(phone: str):
+    if not phone:
+        return None
+
+    text = str(phone)
+    digits = re.findall(r"\d", text)
+
+    if len(digits) < 4:
+        return "***"
+
+    return f"***-***-{''.join(digits[-4:])}"
+
+
+def log_info(label: str, **fields):
+    safe_fields = {}
+
+    for key, value in fields.items():
+        if "phone" in key.lower() or "number" in key.lower():
+            safe_fields[key] = mask_phone(value)
+        elif key.lower() in {"transcript", "full_transcript", "metadata", "custom_analysis", "client_settings"}:
+            safe_fields[key] = "[redacted]"
+        else:
+            safe_fields[key] = value
+
+    logger.info("%s %s", label, safe_fields)
+
+
 # -------------------------------------------------
 # ENV / TWILIO SETUP
 # -------------------------------------------------
@@ -56,9 +119,9 @@ twilio_client = None
 
 if TWILIO_SID and TWILIO_AUTH_TOKEN:
     twilio_client = Client(TWILIO_SID, TWILIO_AUTH_TOKEN)
-    print("✅ Twilio client initialized")
+    logger.info("Twilio client initialized")
 else:
-    print("⚠️ Twilio not configured")
+    logger.warning("Twilio not configured")
 
 
 # -------------------------------------------------
@@ -88,6 +151,12 @@ CALL_PHONE_META = {}
 # -------------------------------------------------
 def create_session_token(email: str):
     session_secret = os.getenv("SESSION_SECRET")
+
+    if not session_secret:
+        raise HTTPException(
+            status_code=500,
+            detail="SESSION_SECRET not configured"
+        )
 
     payload = {
         "email": email,
@@ -197,7 +266,7 @@ def auth_me(authorization: str = Header(None)):
 # -------------------------------------------------
 @app.get("/")
 def root():
-    return {"status": "Gosonic MVP running"}
+    return {"status": "ok", "service": "Gosonic MVP API"}
 
 
 # -------------------------------------------------
@@ -241,6 +310,13 @@ def db_check():
 @app.post("/init-db")
 def init_db(x_admin_key: str = Header(None)):
     require_admin(x_admin_key)
+
+    if os.getenv("ALLOW_DB_INIT", "false").lower() != "true":
+        raise HTTPException(
+            status_code=403,
+            detail="Database initialization endpoint is disabled. Set ALLOW_DB_INIT=true temporarily to use it."
+        )
+
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -576,7 +652,7 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
     plan_tier = data.get("plan_tier", "lite")
     inbound_phone = normalize_phone(data.get("inbound_phone"))
     business_phone = normalize_phone(data.get("business_phone"))
-    timezone = data.get("timezone", "America/New_York")
+    timezone = data.get("timezone", "America/Toronto")
 
     # -------------------------------------------------
     # CONTACT FIELDS
@@ -1758,7 +1834,9 @@ def get_sms_policy(call_outcome, required_fields_present):
 # RETELL INBOUND WEBHOOK
 # -------------------------------------------------
 @app.post("/webhook/inbound")
-async def inbound_webhook(request: Request):
+async def inbound_webhook(request: Request, x_webhook_secret: str = Header(None)):
+    require_webhook_secret(x_webhook_secret)
+
     try:
         data = await request.json()
 
@@ -1831,7 +1909,9 @@ async def inbound_webhook(request: Request):
 # TRIAGE ENDPOINT
 # -------------------------------------------------
 @app.post("/webhook/triage")
-async def triage(request: Request):
+async def triage(request: Request, x_webhook_secret: str = Header(None)):
+    require_webhook_secret(x_webhook_secret)
+
     try:
         data = await request.json()
     except Exception as e:
@@ -1872,7 +1952,9 @@ async def triage(request: Request):
 # CALL SUMMARY WEBHOOK
 # -------------------------------------------------
 @app.post("/webhook/call-summary")
-async def call_summary(request: Request):
+async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
+    require_webhook_secret(x_webhook_secret)
+
     try:
         data = await request.json()
 
