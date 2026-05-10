@@ -3,3 +3,4 @@ uvicorn
 twilio
 psycopg[binary]
 PyJWT
+retell-sdk
