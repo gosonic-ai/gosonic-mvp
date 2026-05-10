@@ -11,7 +11,7 @@ import re
 import logging
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.0")
+app = FastAPI(title="Gosonic MVP API", version="0.2.1")
 
 # -------------------------------------------------
 # LOGGING
@@ -21,6 +21,13 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s"
 )
 logger = logging.getLogger("gosonic")
+
+# Keep third-party SDK/client logs quiet in production.
+logging.getLogger("twilio").setLevel(logging.WARNING)
+logging.getLogger("twilio.http_client").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+LOG_SENSITIVE_DATA = os.getenv("LOG_SENSITIVE_DATA", "false").lower() == "true"
 
 
 # -------------------------------------------------
@@ -94,14 +101,40 @@ def mask_phone(phone: str):
     return f"***-***-{''.join(digits[-4:])}"
 
 
+def mask_text(value: str, max_chars: int = 80):
+    if not value:
+        return None
+
+    text = str(value).replace("\n", " ").strip()
+
+    if LOG_SENSITIVE_DATA:
+        return text[:max_chars]
+
+    return "[redacted]"
+
+
 def log_info(label: str, **fields):
     safe_fields = {}
 
+    sensitive_keys = {
+        "transcript",
+        "full_transcript",
+        "metadata",
+        "custom_analysis",
+        "client_settings",
+        "service_address",
+        "issue_description",
+        "raw_payload",
+        "caller_name",
+    }
+
     for key, value in fields.items():
-        if "phone" in key.lower() or "number" in key.lower():
+        key_lower = key.lower()
+
+        if "phone" in key_lower or "number" in key_lower:
             safe_fields[key] = mask_phone(value)
-        elif key.lower() in {"transcript", "full_transcript", "metadata", "custom_analysis", "client_settings"}:
-            safe_fields[key] = "[redacted]"
+        elif key_lower in sensitive_keys:
+            safe_fields[key] = mask_text(value)
         else:
             safe_fields[key] = value
 
@@ -296,7 +329,7 @@ def db_check():
         }
 
     except Exception as e:
-        print("[DB CHECK ERROR]", str(e))
+        logger.exception("DB check failed")
         return {
             "status": "error",
             "database": "connection_failed",
@@ -554,7 +587,7 @@ def init_db(x_admin_key: str = Header(None)):
         }
 
     except Exception as e:
-        print("[INIT DB ERROR]", str(e))
+        logger.exception("Database initialization failed")
 
         return {
             "status": "error",
@@ -622,7 +655,7 @@ def get_clients(authorization: str = Header(None)):
         }
 
     except Exception as e:
-        print("[CLIENTS READ ERROR]", str(e))
+        logger.exception("Clients read failed")
         return {
             "status": "error",
             "message": str(e)
@@ -839,7 +872,7 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
         }
 
     except Exception as e:
-        print("[CLIENT CREATE ERROR]", str(e))
+        logger.exception("Client create failed")
         return {
             "status": "error",
             "message": str(e)
@@ -943,7 +976,7 @@ def get_calls(
         }
 
     except Exception as e:
-        print("[CALLS READ ERROR]", str(e))
+        logger.exception("Calls read failed")
         return {
             "status": "error",
             "message": str(e)
@@ -1021,7 +1054,7 @@ def get_client_settings(x_admin_key: str = Header(None)):
         }
 
     except Exception as e:
-        print("[CLIENT SETTINGS READ ERROR]", str(e))
+        logger.exception("Client settings read failed")
         return {
             "status": "error",
             "message": str(e)
@@ -1080,7 +1113,7 @@ def get_client_contacts(
         }
 
     except Exception as e:
-        print("[CLIENT CONTACTS READ ERROR]", str(e))
+        logger.exception("Client contacts read failed")
         return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
@@ -1160,7 +1193,7 @@ def get_client_addresses(
         }
 
     except Exception as e:
-        print("[CLIENT ADDRESSES READ ERROR]", str(e))
+        logger.exception("Client addresses read failed")
         return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
@@ -1212,7 +1245,7 @@ async def update_sms_number(request: Request, x_admin_key: str = Header(None)):
         }
 
     except Exception as e:
-        print("[SMS NUMBER UPDATE ERROR]", str(e))
+        logger.exception("SMS number update failed")
         return {
             "status": "error",
             "message": str(e)
@@ -1286,7 +1319,7 @@ async def update_sms_settings(request: Request, x_admin_key: str = Header(None))
         }
 
     except Exception as e:
-        print("[SMS SETTINGS UPDATE ERROR]", str(e))
+        logger.exception("SMS settings update failed")
         return {
             "status": "error",
             "message": str(e)
@@ -1530,20 +1563,20 @@ def get_client_by_key(client_key: str):
                 }
 
                 if client["status"] != "active":
-                    print(f"[CLIENT INACTIVE] {client_key}")
+                    logger.warning("Client inactive: %s", client_key)
                     return None
 
                 return client
 
-            print(f"[CLIENT DB MISS] {client_key}")
+            logger.warning("Client DB miss: %s", client_key)
 
         except Exception as e:
-            print("[CLIENT DB LOOKUP ERROR]", str(e))
+            logger.exception("Client DB lookup failed")
 
     fallback_client = CLIENTS.get(client_key)
 
     if fallback_client:
-        print(f"[CLIENT FALLBACK USED] {client_key}")
+        logger.warning("Client fallback used: %s", client_key)
 
         return {
             **fallback_client,
@@ -1595,7 +1628,7 @@ def get_client_by_inbound_phone(inbound_phone: str):
                 row = cur.fetchone()
 
         if not row:
-            print(f"[INBOUND ROUTING MISS] {formatted_phone}")
+            log_info("[INBOUND ROUTING MISS]", inbound_phone=formatted_phone)
             return None
 
         client = {
@@ -1612,15 +1645,15 @@ def get_client_by_inbound_phone(inbound_phone: str):
         }
 
         if client["status"] != "active":
-            print(f"[INBOUND CLIENT INACTIVE] {formatted_phone}")
+            log_info("[INBOUND CLIENT INACTIVE]", inbound_phone=formatted_phone)
             return None
 
-        print(f"[INBOUND ROUTED] {formatted_phone} -> {client['client_key']}")
+        log_info("[INBOUND ROUTED]", inbound_phone=formatted_phone, client_key=client["client_key"])
 
         return client
 
     except Exception as e:
-        print("[INBOUND ROUTING ERROR]", str(e))
+        logger.exception("Inbound routing failed")
         return None
 
 # -------------------------------------------------
@@ -1667,7 +1700,7 @@ def get_client_settings_by_key(client_key: str):
                 row = cur.fetchone()
 
         if not row:
-            print(f"[CLIENT SETTINGS MISS] {client_key}")
+            logger.warning("Client settings miss: %s", client_key)
             return None
 
         settings = {
@@ -1691,7 +1724,7 @@ def get_client_settings_by_key(client_key: str):
         return settings
 
     except Exception as e:
-        print("[CLIENT SETTINGS LOOKUP ERROR]", str(e))
+        logger.exception("Client settings lookup failed")
         return None
 
 # -------------------------------------------------
@@ -1724,7 +1757,7 @@ def save_call_record(
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        print("[CALL SAVE SKIPPED] DATABASE_URL not configured")
+        logger.warning("Call save skipped: DATABASE_URL not configured")
         return {
             "saved": False,
             "error": "DATABASE_URL not configured"
@@ -1788,7 +1821,7 @@ def save_call_record(
 
             conn.commit()
 
-        print(f"[CALL SAVED] {call_id}")
+        logger.info("[CALL SAVED] call_id=%s", call_id)
 
         return {
             "saved": True,
@@ -1797,7 +1830,7 @@ def save_call_record(
 
     except Exception as e:
         error = str(e)
-        print("[CALL SAVE ERROR]", error)
+        logger.exception("Call save failed")
 
         return {
             "saved": False,
@@ -1866,13 +1899,13 @@ async def inbound_webhook(request: Request, x_webhook_secret: str = Header(None)
             client_id = "hvac_toronto_001"
             routing_source = "fallback_default_client"
 
-        print("[INBOUND WEBHOOK]")
-        print("from_number:", from_number)
-        print("formatted_from_phone:", formatted_from_phone)
-        print("to_number:", to_number)
-        print("formatted_to_phone:", formatted_to_phone)
-        print("client_id:", client_id)
-        print("routing_source:", routing_source)
+        log_info(
+            "[INBOUND WEBHOOK]",
+            from_number=formatted_from_phone or from_number,
+            to_number=formatted_to_phone or to_number,
+            client_id=client_id,
+            routing_source=routing_source
+        )
 
         return {
             "call_inbound": {
@@ -1890,7 +1923,7 @@ async def inbound_webhook(request: Request, x_webhook_secret: str = Header(None)
         }
 
     except Exception as e:
-        print("[INBOUND WEBHOOK ERROR]", str(e))
+        logger.exception("Inbound webhook failed")
 
         return {
             "call_inbound": {
@@ -1915,7 +1948,7 @@ async def triage(request: Request, x_webhook_secret: str = Header(None)):
     try:
         data = await request.json()
     except Exception as e:
-        print("[TRIAGE ERROR] Invalid JSON:", str(e))
+        logger.exception("Triage failed: invalid JSON")
         return {
             "urgency": "standard",
             "route": "standard",
@@ -1942,8 +1975,14 @@ async def triage(request: Request, x_webhook_secret: str = Header(None)):
         "confidence": 0.9 if urgency == "urgent" else 0.75
     }
 
-    print("[TRIAGE INPUT]", transcript_raw)
-    print("[TRIAGE RESPONSE]", response)
+    log_info(
+        "[TRIAGE RESPONSE]",
+        urgency=response["urgency"],
+        route=response["route"],
+        issue_type=response["issue_type"],
+        confidence=response["confidence"],
+        transcript=transcript_raw
+    )
 
     return response
 
@@ -1986,19 +2025,20 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
 
             formatted_phone = normalize_phone(caller_phone_raw)
 
-            print("[CALL STARTED DEBUG]")
-            print("call_id:", call_id)
-            print("caller_phone_raw:", caller_phone_raw)
-            print("formatted_phone:", formatted_phone)
-            print("metadata:", metadata)
-            print("call_keys:", list(call.keys()) if isinstance(call, dict) else None)
+            log_info(
+                "[CALL STARTED]",
+                call_id=call_id,
+                caller_phone=formatted_phone or caller_phone_raw,
+                metadata_present=bool(metadata),
+                call_key_count=len(call.keys()) if isinstance(call, dict) else 0
+            )
 
             if formatted_phone:
                 CALL_PHONE_MAP[call_id] = formatted_phone
                 CALL_PHONE_META[call_id] = time.time()
-                print(f"[PHONE STORED] {call_id} -> {formatted_phone}")
+                log_info("[PHONE STORED]", call_id=call_id, caller_phone=formatted_phone)
             else:
-                print(f"[PHONE NOT FOUND ON CALL_STARTED] {call_id}")
+                logger.warning("[PHONE NOT FOUND ON CALL_STARTED] call_id=%s", call_id)
 
             return {
                 "status": "phone_capture_processed",
@@ -2060,7 +2100,7 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
         client_settings = get_client_settings_by_key(client_id)
 
         if not client_settings:
-            print(f"[CLIENT SETTINGS FALLBACK] {client_id}")
+            logger.warning("Client settings fallback used: %s", client_id)
 
             client_settings = {
                 "business_sms_enabled": True,
@@ -2150,27 +2190,21 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
 
         sms_policy_reason = sms_policy["reason"]
 
-        print("[CALL SUMMARY DEBUG]")
-        print("event_type:", event_type)
-        print("call_id:", call_id)
-        print("custom_analysis:", custom)
-        print("metadata:", metadata)
-        print("client_id:", client_id)
-        print("client_source:", client.get("source"))
-        print("client_business_name:", client.get("business_name"))
-        print("client_settings:", client_settings)
-        print("caller_name:", caller_name)
-        print("service_address:", service_address)
-        print("caller_phone_raw:", caller_phone_raw)
-        print("stored_phone:", CALL_PHONE_MAP.get(call_id))
-        print("formatted_phone:", formatted_phone)
-        print("issue_description:", issue_description)
-        print("urgency:", urgency)
-        print("issue_type:", issue_type)
-        print("short_summary:", short_summary)
-        print("call_outcome:", call_outcome)
-        print("required_fields_present:", required_fields_present)
-        print("sms_policy:", sms_policy)
+        log_info(
+            "[CALL ANALYZED]",
+            event_type=event_type,
+            call_id=call_id,
+            client_id=client_id,
+            client_source=client.get("source"),
+            business_name=client.get("business_name"),
+            caller_phone=formatted_phone,
+            stored_phone=CALL_PHONE_MAP.get(call_id),
+            urgency=urgency,
+            issue_type=issue_type,
+            call_outcome=call_outcome,
+            required_fields_present=required_fields_present,
+            sms_policy_reason=sms_policy_reason
+        )
 
         if call_outcome == "address_fallback":
             business_message = (
@@ -2214,10 +2248,10 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
                     to=client["business_phone"]
                 )
                 business_sent = True
-                print("[TWILIO BUSINESS] Sent")
+                logger.info("[TWILIO BUSINESS] Sent")
             except Exception as e:
                 business_error = str(e)
-                print("[TWILIO BUSINESS ERROR]", business_error)
+                logger.error("[TWILIO BUSINESS ERROR] %s", business_error)
         else:
             if not send_business_sms:
                 business_error = f"Business SMS suppressed: {sms_policy_reason}"
@@ -2225,7 +2259,7 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
                 business_error = "Twilio client or SMS sender number missing"
                 
 
-            print("[TWILIO BUSINESS SKIPPED]", business_error)
+            logger.info("[TWILIO BUSINESS SKIPPED] %s", business_error)
 
         caller_sent = False
         caller_error = None
@@ -2256,15 +2290,15 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
                         to=formatted_phone
                     )
                     caller_sent = True
-                    print("[TWILIO CALLER] Sent")
+                    logger.info("[TWILIO CALLER] Sent")
 
                 except Exception as e:
                     caller_error = str(e)
-                    print("[TWILIO CALLER ERROR]", caller_error)
+                    logger.error("[TWILIO CALLER ERROR] %s", caller_error)
 
             else:
                 caller_error = "Twilio client or SMS sender number missing"
-                print("[TWILIO CALLER SKIPPED]", caller_error)
+                logger.info("[TWILIO CALLER SKIPPED] %s", caller_error)
 
         else:
             if not send_caller_sms:
@@ -2279,7 +2313,7 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
             elif not client_settings.get("caller_sms_enabled", True):
                 caller_error = "Caller SMS disabled for client"
 
-            print("[TWILIO CALLER SKIPPED]", caller_error)
+            logger.info("[TWILIO CALLER SKIPPED] %s", caller_error)
 
         # -------------------------------------------------
         # PERSIST CALL RECORD
@@ -2328,5 +2362,5 @@ async def call_summary(request: Request, x_webhook_secret: str = Header(None)):
         }
 
     except Exception as e:
-        print("[WEBHOOK ERROR]", str(e))
+        logger.exception("Call summary webhook failed")
         return {"status": "error", "message": str(e)}
