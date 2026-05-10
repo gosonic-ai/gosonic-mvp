@@ -12,7 +12,7 @@ import logging
 import json
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.2")
+app = FastAPI(title="Gosonic MVP API", version="0.2.3")
 
 # -------------------------------------------------
 # LOGGING
@@ -1960,11 +1960,21 @@ def get_sms_policy(call_outcome, required_fields_present):
 # RETELL INBOUND WEBHOOK
 # -------------------------------------------------
 @app.post("/webhook/inbound")
-async def inbound_webhook(request: Request, x_webhook_secret: str = Header(None)):
+async def inbound_webhook(
+    request: Request,
+    x_webhook_secret: str = Header(None),
+    x_retell_signature: str = Header(None)
+):
     require_webhook_secret(x_webhook_secret)
 
     try:
-        data = await request.json()
+        raw_body = (await request.body()).decode("utf-8")
+        observe_retell_signature(
+            raw_body,
+            x_retell_signature,
+            label="[RETELL INBOUND SIGNATURE]"
+        )
+        data = json.loads(raw_body or "{}")
 
         call_inbound = data.get("call_inbound") or {}
 
