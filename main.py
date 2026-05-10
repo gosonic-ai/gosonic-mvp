@@ -9,9 +9,10 @@ import os
 import time
 import re
 import logging
+import json
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.1")
+app = FastAPI(title="Gosonic MVP API", version="0.2.2")
 
 # -------------------------------------------------
 # LOGGING
@@ -87,6 +88,54 @@ def require_webhook_secret(x_webhook_secret: str):
 
     return True
 
+
+
+def verify_retell_signature(raw_body: str, signature: str, enforce_env: str = "RETELL_VERIFY_TRIAGE_SIGNATURE"):
+    """
+    Verifies Retell-signed Custom Function requests using X-Retell-Signature.
+
+    This is intentionally opt-in per endpoint. Set RETELL_VERIFY_TRIAGE_SIGNATURE=true
+    only after confirming Retell is sending X-Retell-Signature to /webhook/triage.
+    """
+    should_enforce = os.getenv(enforce_env, "false").lower() == "true"
+
+    if not should_enforce:
+        return True
+
+    api_key = os.getenv("RETELL_API_KEY")
+
+    if not api_key:
+        logger.error("[RETELL SIGNATURE] RETELL_API_KEY not configured")
+        raise HTTPException(status_code=500, detail="Retell verification not configured")
+
+    if not signature:
+        logger.warning("[RETELL SIGNATURE] Missing X-Retell-Signature")
+        raise HTTPException(status_code=401, detail="Missing Retell signature")
+
+    try:
+        from retell import Retell
+
+        retell_client = Retell(api_key=api_key)
+        valid_signature = retell_client.verify(
+            raw_body,
+            api_key=str(api_key),
+            signature=str(signature),
+        )
+
+    except ImportError:
+        logger.error("[RETELL SIGNATURE] retell package not installed")
+        raise HTTPException(status_code=500, detail="Retell SDK not installed")
+
+    except Exception:
+        logger.exception("[RETELL SIGNATURE] Verification error")
+        raise HTTPException(status_code=401, detail="Invalid Retell signature")
+
+    if not valid_signature:
+        logger.warning("[RETELL SIGNATURE] Invalid signature")
+        raise HTTPException(status_code=401, detail="Invalid Retell signature")
+
+    logger.info("[RETELL SIGNATURE] Verified")
+    return True
 
 def mask_phone(phone: str):
     if not phone:
@@ -1942,12 +1991,22 @@ async def inbound_webhook(request: Request, x_webhook_secret: str = Header(None)
 # TRIAGE ENDPOINT
 # -------------------------------------------------
 @app.post("/webhook/triage")
-async def triage(request: Request, x_webhook_secret: str = Header(None)):
+async def triage(
+    request: Request,
+    x_webhook_secret: str = Header(None),
+    x_retell_signature: str = Header(None)
+):
+    # Legacy optional shared-secret support remains available, but the preferred
+    # production path is Retell signature verification using X-Retell-Signature.
     require_webhook_secret(x_webhook_secret)
 
     try:
-        data = await request.json()
-    except Exception as e:
+        raw_body = (await request.body()).decode("utf-8")
+        verify_retell_signature(raw_body, x_retell_signature)
+        data = json.loads(raw_body or "{}")
+    except HTTPException:
+        raise
+    except Exception:
         logger.exception("Triage failed: invalid JSON")
         return {
             "urgency": "standard",
@@ -1957,11 +2016,17 @@ async def triage(request: Request, x_webhook_secret: str = Header(None)):
             "confidence": 0.5
         }
 
+    # Retell Custom Functions may send either a flat args-only payload or
+    # the documented wrapper: { name, call, args }. Support both.
+    args = data.get("args") if isinstance(data.get("args"), dict) else data
+    call = data.get("call") if isinstance(data.get("call"), dict) else {}
+
     transcript_raw = (
-        data.get("transcript")
-        or data.get("issue_text")
-        or data.get("summary")
-        or data.get("message")
+        args.get("transcript")
+        or args.get("issue_text")
+        or args.get("summary")
+        or args.get("message")
+        or call.get("transcript")
         or ""
     )
 
