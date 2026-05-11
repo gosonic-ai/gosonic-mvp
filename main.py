@@ -1340,6 +1340,114 @@ def init_db(x_admin_key: str = Header(None)):
                 """)
 
                 # -------------------------------------------------
+                # CLIENT PLANS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS client_plans (
+                        id SERIAL PRIMARY KEY,
+                        client_key TEXT NOT NULL
+                            REFERENCES clients(client_key)
+                            ON DELETE CASCADE,
+
+                        plan_name TEXT NOT NULL DEFAULT 'Lite Voice Intake',
+                        concurrent_call_limit INTEGER NOT NULL DEFAULT 1,
+
+                        included_minutes INTEGER,
+                        overage_rate NUMERIC(10,4),
+
+                        billing_anchor_day INTEGER NOT NULL DEFAULT 1,
+                        activation_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+                        active BOOLEAN NOT NULL DEFAULT TRUE,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_client_plans_client_key
+                    ON client_plans(client_key);
+                """)
+
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_client_plans_one_active
+                    ON client_plans(client_key)
+                    WHERE active = TRUE;
+                """)
+
+                # -------------------------------------------------
+                # INVOICES TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS invoices (
+                        id SERIAL PRIMARY KEY,
+                        invoice_number TEXT UNIQUE NOT NULL,
+
+                        client_key TEXT NOT NULL
+                            REFERENCES clients(client_key)
+                            ON DELETE CASCADE,
+
+                        billing_period_start TIMESTAMPTZ NOT NULL,
+                        billing_period_end TIMESTAMPTZ NOT NULL,
+
+                        issue_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        due_date TIMESTAMPTZ,
+
+                        subtotal NUMERIC(10,2) NOT NULL DEFAULT 0,
+                        tax NUMERIC(10,2) NOT NULL DEFAULT 0,
+                        total NUMERIC(10,2) NOT NULL DEFAULT 0,
+
+                        status TEXT NOT NULL DEFAULT 'draft',
+
+                        minutes_included INTEGER,
+                        minutes_used NUMERIC(10,2) NOT NULL DEFAULT 0,
+                        overage_minutes NUMERIC(10,2) NOT NULL DEFAULT 0,
+                        overage_rate NUMERIC(10,4),
+
+                        pdf_url TEXT,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_invoices_client_key
+                    ON invoices(client_key);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_invoices_billing_period
+                    ON invoices(client_key, billing_period_start, billing_period_end);
+                """)
+
+                # -------------------------------------------------
+                # INVOICE LINE ITEMS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS invoice_line_items (
+                        id SERIAL PRIMARY KEY,
+
+                        invoice_id INTEGER NOT NULL
+                            REFERENCES invoices(id)
+                            ON DELETE CASCADE,
+
+                        description TEXT NOT NULL,
+                        quantity NUMERIC(10,2) NOT NULL DEFAULT 1,
+                        unit_price NUMERIC(10,4) NOT NULL DEFAULT 0,
+                        amount NUMERIC(10,2) NOT NULL DEFAULT 0,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_invoice_line_items_invoice_id
+                    ON invoice_line_items(invoice_id);
+                """)
+
+                # -------------------------------------------------
                 # SEED CLIENT
                 # -------------------------------------------------
                 cur.execute("""
@@ -1404,6 +1512,33 @@ def init_db(x_admin_key: str = Header(None)):
                     )
                     ON CONFLICT (client_key)
                     DO NOTHING;
+                """)
+
+                # -------------------------------------------------
+                # SEED CLIENT PLAN
+                # -------------------------------------------------
+                cur.execute("""
+                    INSERT INTO client_plans (
+                        client_key,
+                        plan_name,
+                        concurrent_call_limit,
+                        included_minutes,
+                        overage_rate,
+                        billing_anchor_day,
+                        activation_date,
+                        active
+                    )
+                    VALUES (
+                        'hvac_toronto_001',
+                        'Lite Voice Intake',
+                        1,
+                        300,
+                        0.18,
+                        11,
+                        NOW(),
+                        TRUE
+                    )
+                    ON CONFLICT DO NOTHING;
                 """)
 
                 # -------------------------------------------------
