@@ -1339,6 +1339,16 @@ def init_db(x_admin_key: str = Header(None)):
                     ADD COLUMN IF NOT EXISTS caller_error TEXT;
                 """)
 
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS call_duration_seconds INTEGER;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS billable_minutes NUMERIC(10,2) NOT NULL DEFAULT 0;
+                """)
+
                 # -------------------------------------------------
                 # CLIENT PLANS TABLE
                 # -------------------------------------------------
