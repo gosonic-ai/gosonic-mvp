@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
 from psycopg.types.json import Jsonb
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 import psycopg
 import jwt
 import os
@@ -2301,6 +2302,210 @@ def get_client_account(
             "status": "error",
             "message": str(e)
         }
+
+# -------------------------------------------------
+# INVOICE GENERATION ENDPOINT
+# -------------------------------------------------
+@app.post("/invoices/generate-current")
+async def generate_current_invoice(request: Request, authorization: str = Header(None)):
+    payload = require_auth_token(authorization)
+
+    if not is_platform_admin(payload):
+        raise HTTPException(status_code=403, detail="Platform admin access required")
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    data = await request.json()
+    client_key = (data.get("client_key") or "").strip()
+
+    if not client_key:
+        raise HTTPException(status_code=400, detail="client_key is required")
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        plan_name,
+                        included_minutes,
+                        overage_rate,
+                        billing_anchor_day
+                    FROM client_plans
+                    WHERE client_key = %s
+                      AND active = TRUE
+                    ORDER BY created_at DESC
+                    LIMIT 1;
+                """, (client_key,))
+
+                plan = cur.fetchone()
+
+                if not plan:
+                    raise HTTPException(status_code=404, detail="active client plan not found")
+
+                plan_name = plan[0]
+                included_minutes = plan[1] or 0
+                overage_rate = Decimal(str(plan[2] or 0))
+                billing_anchor_day = int(plan[3] or 1)
+
+                now = datetime.now(timezone.utc)
+                anchor_day = max(1, min(billing_anchor_day, 28))
+
+                period_start = datetime(now.year, now.month, anchor_day, tzinfo=timezone.utc)
+
+                if now < period_start:
+                    previous_month = now.month - 1
+                    previous_year = now.year
+
+                    if previous_month == 0:
+                        previous_month = 12
+                        previous_year -= 1
+
+                    period_start = datetime(previous_year, previous_month, anchor_day, tzinfo=timezone.utc)
+
+                next_month = period_start.month + 1
+                next_year = period_start.year
+
+                if next_month == 13:
+                    next_month = 1
+                    next_year += 1
+
+                period_end_exclusive = datetime(next_year, next_month, anchor_day, tzinfo=timezone.utc)
+                period_end_display = period_end_exclusive - timedelta(seconds=1)
+
+                # Prevent duplicate invoice snapshots for same client + period.
+                cur.execute("""
+                    SELECT id, invoice_number
+                    FROM invoices
+                    WHERE client_key = %s
+                      AND billing_period_start = %s
+                      AND billing_period_end = %s
+                    LIMIT 1;
+                """, (client_key, period_start, period_end_display))
+
+                existing = cur.fetchone()
+
+                if existing:
+                    return {
+                        "status": "ok",
+                        "message": "Invoice already exists for this billing period",
+                        "invoice_id": existing[0],
+                        "invoice_number": existing[1],
+                        "created": False
+                    }
+
+                cur.execute("""
+                    SELECT
+                        COALESCE(SUM(billable_minutes), 0),
+                        COUNT(*)
+                    FROM calls
+                    WHERE client_key = %s
+                      AND created_at >= %s
+                      AND created_at < %s;
+                """, (client_key, period_start, period_end_exclusive))
+
+                usage = cur.fetchone()
+
+                minutes_used = Decimal(str(usage[0] or 0))
+                call_count = int(usage[1] or 0)
+
+                overage_minutes = max(minutes_used - Decimal(str(included_minutes)), Decimal("0"))
+                overage_amount = (overage_minutes * overage_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+                subtotal = overage_amount
+                tax = Decimal("0.00")
+                total = subtotal + tax
+
+                invoice_number = f"GOS-{client_key.upper()}-{period_start.strftime('%Y%m%d')}-{int(time.time())}"
+
+                due_date = now + timedelta(days=15)
+
+                cur.execute("""
+                    INSERT INTO invoices (
+                        invoice_number,
+                        client_key,
+                        billing_period_start,
+                        billing_period_end,
+                        issue_date,
+                        due_date,
+                        subtotal,
+                        tax,
+                        total,
+                        status,
+                        minutes_included,
+                        minutes_used,
+                        overage_minutes,
+                        overage_rate
+                    )
+                    VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s, 'issued', %s, %s, %s, %s)
+                    RETURNING id;
+                """, (
+                    invoice_number,
+                    client_key,
+                    period_start,
+                    period_end_display,
+                    due_date,
+                    subtotal,
+                    tax,
+                    total,
+                    included_minutes,
+                    minutes_used,
+                    overage_minutes,
+                    overage_rate
+                ))
+
+                invoice = cur.fetchone()
+                invoice_id = invoice[0]
+
+                cur.execute("""
+                    INSERT INTO invoice_line_items (
+                        invoice_id,
+                        description,
+                        quantity,
+                        unit_price,
+                        amount
+                    )
+                    VALUES (%s, %s, %s, %s, %s);
+                """, (
+                    invoice_id,
+                    f"{plan_name} usage overage",
+                    overage_minutes,
+                    overage_rate,
+                    overage_amount
+                ))
+
+            conn.commit()
+
+        return {
+            "status": "ok",
+            "message": "Invoice generated",
+            "created": True,
+            "invoice": {
+                "invoice_id": invoice_id,
+                "invoice_number": invoice_number,
+                "client_key": client_key,
+                "billing_period_start": period_start.isoformat(),
+                "billing_period_end": period_end_display.isoformat(),
+                "call_count": call_count,
+                "minutes_included": included_minutes,
+                "minutes_used": float(minutes_used),
+                "overage_minutes": float(overage_minutes),
+                "overage_rate": float(overage_rate),
+                "subtotal": float(subtotal),
+                "tax": float(tax),
+                "total": float(total),
+                "status": "issued"
+            }
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Invoice generation failed")
+        return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
 # CLIENT SETTINGS READ ENDPOINT
