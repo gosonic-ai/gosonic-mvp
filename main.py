@@ -1995,6 +1995,258 @@ def get_calls(
             "status": "error",
             "message": str(e)
         }
+    
+# -------------------------------------------------
+# CLIENT ACCOUNT ENDPOINT
+# -------------------------------------------------
+@app.get("/client/account")
+def get_client_account(
+    client_key: str = Query(None),
+    authorization: str = Header(None)
+):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not effective_client_key:
+        raise HTTPException(
+            status_code=400,
+            detail="client_key is required for account view"
+        )
+
+    if not database_url:
+        return {
+            "status": "error",
+            "message": "DATABASE_URL not configured"
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                # -------------------------------------------------
+                # CLIENT
+                # -------------------------------------------------
+                cur.execute("""
+                    SELECT
+                        client_key,
+                        business_name,
+                        vertical,
+                        plan_tier,
+                        status,
+                        timezone,
+                        created_at
+                    FROM clients
+                    WHERE client_key = %s
+                    LIMIT 1;
+                """, (effective_client_key,))
+
+                client_row = cur.fetchone()
+
+                if not client_row:
+                    raise HTTPException(status_code=404, detail="client not found")
+
+                # -------------------------------------------------
+                # ACTIVE PLAN
+                # -------------------------------------------------
+                cur.execute("""
+                    SELECT
+                        plan_name,
+                        concurrent_call_limit,
+                        included_minutes,
+                        overage_rate,
+                        billing_anchor_day,
+                        activation_date
+                    FROM client_plans
+                    WHERE client_key = %s
+                      AND active = TRUE
+                    ORDER BY created_at DESC
+                    LIMIT 1;
+                """, (effective_client_key,))
+
+                plan_row = cur.fetchone()
+
+                if not plan_row:
+                    raise HTTPException(status_code=404, detail="active client plan not found")
+
+                plan_name = plan_row[0]
+                concurrent_call_limit = plan_row[1]
+                included_minutes = plan_row[2]
+                overage_rate = float(plan_row[3]) if plan_row[3] is not None else None
+                billing_anchor_day = plan_row[4]
+                activation_date = plan_row[5]
+
+                # -------------------------------------------------
+                # BILLING PERIOD
+                # -------------------------------------------------
+                now = datetime.now(timezone.utc)
+
+                anchor_day = int(billing_anchor_day or 1)
+                anchor_day = max(1, min(anchor_day, 28))
+
+                current_start = datetime(
+                    now.year,
+                    now.month,
+                    anchor_day,
+                    tzinfo=timezone.utc
+                )
+
+                if now < current_start:
+                    previous_month = now.month - 1
+                    previous_year = now.year
+
+                    if previous_month == 0:
+                        previous_month = 12
+                        previous_year -= 1
+
+                    current_start = datetime(
+                        previous_year,
+                        previous_month,
+                        anchor_day,
+                        tzinfo=timezone.utc
+                    )
+
+                next_month = current_start.month + 1
+                next_year = current_start.year
+
+                if next_month == 13:
+                    next_month = 1
+                    next_year += 1
+
+                next_start = datetime(
+                    next_year,
+                    next_month,
+                    anchor_day,
+                    tzinfo=timezone.utc
+                )
+
+                current_end = next_start - timedelta(seconds=1)
+
+                # -------------------------------------------------
+                # USAGE SUMMARY
+                # -------------------------------------------------
+                cur.execute("""
+                    SELECT
+                        COALESCE(SUM(billable_minutes), 0),
+                        COUNT(*)
+                    FROM calls
+                    WHERE client_key = %s
+                      AND created_at >= %s
+                      AND created_at < %s;
+                """, (
+                    effective_client_key,
+                    current_start,
+                    next_start
+                ))
+
+                usage_row = cur.fetchone()
+
+                minutes_used = float(usage_row[0] or 0)
+                call_count = int(usage_row[1] or 0)
+
+                if included_minutes is None:
+                    remaining_minutes = None
+                    overage_minutes = 0
+                    estimated_overage = 0
+                else:
+                    remaining_minutes = max(float(included_minutes) - minutes_used, 0)
+                    overage_minutes = max(minutes_used - float(included_minutes), 0)
+                    estimated_overage = round(
+                        overage_minutes * float(overage_rate or 0),
+                        2
+                    )
+
+                # -------------------------------------------------
+                # INVOICE HISTORY
+                # -------------------------------------------------
+                cur.execute("""
+                    SELECT
+                        invoice_number,
+                        billing_period_start,
+                        billing_period_end,
+                        issue_date,
+                        due_date,
+                        subtotal,
+                        tax,
+                        total,
+                        status,
+                        minutes_included,
+                        minutes_used,
+                        overage_minutes,
+                        overage_rate,
+                        pdf_url
+                    FROM invoices
+                    WHERE client_key = %s
+                    ORDER BY issue_date DESC
+                    LIMIT 12;
+                """, (effective_client_key,))
+
+                invoice_rows = cur.fetchall()
+
+        invoices = []
+
+        for row in invoice_rows:
+            invoices.append({
+                "invoice_number": row[0],
+                "billing_period_start": row[1].isoformat() if row[1] else None,
+                "billing_period_end": row[2].isoformat() if row[2] else None,
+                "issue_date": row[3].isoformat() if row[3] else None,
+                "due_date": row[4].isoformat() if row[4] else None,
+                "subtotal": float(row[5] or 0),
+                "tax": float(row[6] or 0),
+                "total": float(row[7] or 0),
+                "status": row[8],
+                "minutes_included": row[9],
+                "minutes_used": float(row[10] or 0),
+                "overage_minutes": float(row[11] or 0),
+                "overage_rate": float(row[12]) if row[12] is not None else None,
+                "pdf_url": row[13]
+            })
+
+        return {
+            "status": "ok",
+            "client": {
+                "client_key": client_row[0],
+                "business_name": client_row[1],
+                "vertical": client_row[2],
+                "plan_tier": client_row[3],
+                "status": client_row[4],
+                "timezone": client_row[5],
+                "timezone_label": timezone_label(client_row[5]),
+                "created_at": client_row[6].isoformat() if client_row[6] else None
+            },
+            "plan": {
+                "plan_name": plan_name,
+                "concurrent_call_limit": concurrent_call_limit,
+                "included_minutes": included_minutes,
+                "overage_rate": overage_rate,
+                "billing_anchor_day": billing_anchor_day,
+                "activation_date": activation_date.isoformat() if activation_date else None
+            },
+            "billing_period": {
+                "start": current_start.isoformat(),
+                "end": current_end.isoformat(),
+                "next_start": next_start.isoformat()
+            },
+            "usage": {
+                "call_count": call_count,
+                "minutes_used": round(minutes_used, 2),
+                "included_minutes": included_minutes,
+                "remaining_minutes": round(remaining_minutes, 2) if remaining_minutes is not None else None,
+                "overage_minutes": round(overage_minutes, 2),
+                "estimated_overage": estimated_overage
+            },
+            "invoice_history": invoices
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Client account read failed")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 # -------------------------------------------------
 # CLIENT SETTINGS READ ENDPOINT
