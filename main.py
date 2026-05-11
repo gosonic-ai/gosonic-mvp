@@ -2791,7 +2791,18 @@ def save_call_record(
 
     try:
         with psycopg.connect(database_url) as conn:
-            with conn.cursor() as cur:
+            with conn.cursor() as cur:             
+                # -------------------------------------------------
+                # BILLABLE USAGE
+                # -------------------------------------------------
+                call_duration_seconds = (
+                    raw_payload.get("duration_ms", 0) / 1000
+                    if raw_payload.get("duration_ms")
+                    else 0
+                )
+
+                billable_minutes = round(call_duration_seconds / 60, 2)
+
                 cur.execute("""
                     INSERT INTO calls (
                         call_id,
@@ -2808,10 +2819,12 @@ def save_call_record(
                         business_error,
                         caller_notified,
                         caller_error,
-                        raw_payload
+                        raw_payload,
+                        call_duration_seconds,
+                        billable_minutes
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (call_id) DO UPDATE SET
                         caller_name = EXCLUDED.caller_name,
@@ -2826,7 +2839,9 @@ def save_call_record(
                         business_error = EXCLUDED.business_error,
                         caller_notified = EXCLUDED.caller_notified,
                         caller_error = EXCLUDED.caller_error,
-                        raw_payload = EXCLUDED.raw_payload;
+                        raw_payload = EXCLUDED.raw_payload,
+                        call_duration_seconds = EXCLUDED.call_duration_seconds,
+                        billable_minutes = EXCLUDED.billable_minutes;
                 """, (
                     call_id,
                     client_key,
@@ -2842,7 +2857,9 @@ def save_call_record(
                     business_error,
                     caller_notified,
                     caller_error,
-                    Jsonb(raw_payload)
+                    Jsonb(raw_payload),
+                    call_duration_seconds,
+                    billable_minutes
                 ))
 
             conn.commit()
