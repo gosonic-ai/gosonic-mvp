@@ -15,7 +15,7 @@ import hmac
 import secrets
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.5")
+app = FastAPI(title="Gosonic MVP API", version="0.2.6")
 
 # -------------------------------------------------
 # LOGGING
@@ -366,6 +366,7 @@ def create_session_token(user_profile: dict):
         "full_name": user_profile.get("full_name"),
         "business_name": user_profile.get("business_name"),
         "timezone": user_profile.get("timezone"),
+        "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=12)
     }
 
@@ -572,6 +573,8 @@ async def auth_login(request: Request):
 
     return {
         "status": "ok",
+        "token_type": "Bearer",
+        "expires_in_seconds": 43200,
         "token": token,
         "user": {
             "user_id": user.get("user_id"),
@@ -587,6 +590,57 @@ async def auth_login(request: Request):
         },
         "email": user.get("email")
     }
+
+# -------------------------------------------------
+# ADMIN SESSION TOKEN ENDPOINT
+# -------------------------------------------------
+@app.post("/auth/admin-token")
+def auth_admin_token(x_admin_key: str = Header(None)):
+    """
+    Generates a normal JWT platform_admin session using ADMIN_API_KEY.
+
+    This is useful for PowerShell/API testing. Most dashboard traffic should
+    still use /auth/login with ADMIN_EMAIL + ADMIN_PASSWORD.
+    """
+    require_admin(x_admin_key)
+
+    admin_email = os.getenv("ADMIN_EMAIL", "admin@gosonic.com")
+
+    user = {
+        "user_id": None,
+        "client_key": None,
+        "full_name": os.getenv("ADMIN_FULL_NAME", "Gosonic Admin"),
+        "email": admin_email,
+        "role": "platform_admin",
+        "status": "active",
+        "last_login_at": None,
+        "business_name": os.getenv("ADMIN_COMPANY_NAME", "Gosonic"),
+        "timezone": DEFAULT_CLIENT_TIMEZONE,
+        "timezone_label": timezone_label(DEFAULT_CLIENT_TIMEZONE),
+        "auth_source": "admin_api_key"
+    }
+
+    token = create_session_token(user)
+
+    return {
+        "status": "ok",
+        "token_type": "Bearer",
+        "expires_in_seconds": 43200,
+        "token": token,
+        "user": {
+            "user_id": user.get("user_id"),
+            "client_key": user.get("client_key"),
+            "full_name": user.get("full_name"),
+            "email": user.get("email"),
+            "role": user.get("role"),
+            "business_name": user.get("business_name"),
+            "timezone": user.get("timezone"),
+            "timezone_label": user.get("timezone_label"),
+            "auth_source": user.get("auth_source")
+        },
+        "email": user.get("email")
+    }
+
 
 # -------------------------------------------------
 # AUTH SESSION CHECK
