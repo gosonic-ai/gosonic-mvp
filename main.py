@@ -2508,6 +2508,211 @@ async def generate_current_invoice(request: Request, authorization: str = Header
         return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
+# INVOICES READ ENDPOINT
+# -------------------------------------------------
+@app.get("/invoices")
+def get_invoices(
+    client_key: str = Query(None),
+    authorization: str = Header(None)
+):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                where_sql, params = scoped_where_clause("invoices", effective_client_key)
+
+                cur.execute(f"""
+                    SELECT
+                        id,
+                        invoice_number,
+                        client_key,
+                        billing_period_start,
+                        billing_period_end,
+                        issue_date,
+                        due_date,
+                        subtotal,
+                        tax,
+                        total,
+                        status,
+                        minutes_included,
+                        minutes_used,
+                        overage_minutes,
+                        overage_rate,
+                        pdf_url,
+                        created_at,
+                        updated_at
+                    FROM invoices
+                    {where_sql}
+                    ORDER BY issue_date DESC
+                    LIMIT 100;
+                """, params)
+
+                rows = cur.fetchall()
+
+        invoices = []
+
+        for row in rows:
+            invoices.append({
+                "invoice_id": row[0],
+                "invoice_number": row[1],
+                "client_key": row[2],
+                "billing_period_start": row[3].isoformat() if row[3] else None,
+                "billing_period_end": row[4].isoformat() if row[4] else None,
+                "issue_date": row[5].isoformat() if row[5] else None,
+                "due_date": row[6].isoformat() if row[6] else None,
+                "subtotal": float(row[7] or 0),
+                "tax": float(row[8] or 0),
+                "total": float(row[9] or 0),
+                "status": row[10],
+                "minutes_included": row[11],
+                "minutes_used": float(row[12] or 0),
+                "overage_minutes": float(row[13] or 0),
+                "overage_rate": float(row[14]) if row[14] is not None else None,
+                "pdf_url": row[15],
+                "created_at": row[16].isoformat() if row[16] else None,
+                "updated_at": row[17].isoformat() if row[17] else None
+            })
+
+        return {
+            "status": "ok",
+            "count": len(invoices),
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
+            "invoices": invoices
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Invoices read failed")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
+# INVOICE DETAIL ENDPOINT
+# -------------------------------------------------
+@app.get("/invoices/detail")
+def get_invoice_detail(
+    invoice_number: str = Query(None),
+    authorization: str = Header(None)
+):
+    payload = require_auth_token(authorization)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not invoice_number:
+        raise HTTPException(status_code=400, detail="invoice_number is required")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        id,
+                        invoice_number,
+                        client_key,
+                        billing_period_start,
+                        billing_period_end,
+                        issue_date,
+                        due_date,
+                        subtotal,
+                        tax,
+                        total,
+                        status,
+                        minutes_included,
+                        minutes_used,
+                        overage_minutes,
+                        overage_rate,
+                        pdf_url,
+                        created_at,
+                        updated_at
+                    FROM invoices
+                    WHERE invoice_number = %s
+                    LIMIT 1;
+                """, (invoice_number,))
+
+                row = cur.fetchone()
+
+                if not row:
+                    raise HTTPException(status_code=404, detail="invoice not found")
+
+                invoice_client_key = row[2]
+                effective_client_key = resolve_effective_client_key(payload, invoice_client_key)
+
+                if effective_client_key != invoice_client_key:
+                    raise HTTPException(status_code=403, detail="Access denied for invoice")
+
+                invoice_id = row[0]
+
+                cur.execute("""
+                    SELECT
+                        id,
+                        description,
+                        quantity,
+                        unit_price,
+                        amount,
+                        created_at
+                    FROM invoice_line_items
+                    WHERE invoice_id = %s
+                    ORDER BY id ASC;
+                """, (invoice_id,))
+
+                line_rows = cur.fetchall()
+
+        line_items = []
+
+        for item in line_rows:
+            line_items.append({
+                "line_item_id": item[0],
+                "description": item[1],
+                "quantity": float(item[2] or 0),
+                "unit_price": float(item[3] or 0),
+                "amount": float(item[4] or 0),
+                "created_at": item[5].isoformat() if item[5] else None
+            })
+
+        return {
+            "status": "ok",
+            "invoice": {
+                "invoice_id": row[0],
+                "invoice_number": row[1],
+                "client_key": row[2],
+                "billing_period_start": row[3].isoformat() if row[3] else None,
+                "billing_period_end": row[4].isoformat() if row[4] else None,
+                "issue_date": row[5].isoformat() if row[5] else None,
+                "due_date": row[6].isoformat() if row[6] else None,
+                "subtotal": float(row[7] or 0),
+                "tax": float(row[8] or 0),
+                "total": float(row[9] or 0),
+                "status": row[10],
+                "minutes_included": row[11],
+                "minutes_used": float(row[12] or 0),
+                "overage_minutes": float(row[13] or 0),
+                "overage_rate": float(row[14]) if row[14] is not None else None,
+                "pdf_url": row[15],
+                "created_at": row[16].isoformat() if row[16] else None,
+                "updated_at": row[17].isoformat() if row[17] else None
+            },
+            "line_items": line_items
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Invoice detail read failed")
+        return {"status": "error", "message": str(e)}
+
+# -------------------------------------------------
 # CLIENT SETTINGS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/client-settings")
