@@ -1960,7 +1960,7 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "escalation_reason": row[22],
                     "transcript": row[23],
                     "ended_at": row[24].isoformat() if row[24] else None,
-                    "created_at": row[25].isoformat() if row[25] else None
+                    "created_at": row[25].isoformat() if row[25] else None,
                 }
             )
 
@@ -3484,6 +3484,15 @@ def save_call_record(
     caller_notified,
     caller_error,
     raw_payload,
+    call_status=None,
+    webhook_status=None,
+    agent_id=None,
+    call_direction=None,
+    confidence=None,
+    processing_latency_ms=None,
+    escalation_reason=None,
+    transcript=None,
+    ended_at=None,
 ):
     """
     Persists analyzed call results to PostgreSQL.
@@ -3531,10 +3540,19 @@ def save_call_record(
                         caller_error,
                         raw_payload,
                         call_duration_seconds,
-                        billable_minutes
+                        billable_minutes,
+                        call_status,
+                        webhook_status,
+                        agent_id,
+                        call_direction,
+                        confidence,
+                        processing_latency_ms,
+                        escalation_reason,
+                        transcript,
+                        ended_at
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (call_id) DO UPDATE SET
                         caller_name = EXCLUDED.caller_name,
@@ -3551,7 +3569,16 @@ def save_call_record(
                         caller_error = EXCLUDED.caller_error,
                         raw_payload = EXCLUDED.raw_payload,
                         call_duration_seconds = EXCLUDED.call_duration_seconds,
-                        billable_minutes = EXCLUDED.billable_minutes;
+                        billable_minutes = EXCLUDED.billable_minutes,
+                        call_status = EXCLUDED.call_status,
+                        webhook_status = EXCLUDED.webhook_status,
+                        agent_id = EXCLUDED.agent_id,
+                        call_direction = EXCLUDED.call_direction,
+                        confidence = EXCLUDED.confidence,
+                        processing_latency_ms = EXCLUDED.processing_latency_ms,
+                        escalation_reason = EXCLUDED.escalation_reason,
+                        transcript = EXCLUDED.transcript,
+                        ended_at = EXCLUDED.ended_at;
                 """,
                     (
                         call_id,
@@ -3571,6 +3598,15 @@ def save_call_record(
                         Jsonb(raw_payload),
                         call_duration_seconds,
                         billable_minutes,
+                        call_status,
+                        webhook_status,
+                        agent_id,
+                        call_direction,
+                        confidence,
+                        processing_latency_ms,
+                        escalation_reason,
+                        transcript,
+                        ended_at
                     ),
                 )
 
@@ -4087,6 +4123,26 @@ async def call_summary(
             caller_notified=caller_sent,
             caller_error=caller_error,
             raw_payload=data,
+
+            call_status="completed",
+            webhook_status="received",
+
+            agent_id=data.get("agent_id"),
+            call_direction=data.get("direction"),
+
+            confidence=analysis.get("confidence"),
+
+            processing_latency_ms=data.get("latency_ms"),
+
+            escalation_reason=(
+                "urgent_call"
+                if urgency == "urgent"
+                else None
+            ),
+
+            transcript=full_transcript,
+
+            ended_at=datetime.now(timezone.utc),
         )
 
         CALL_PHONE_MAP.pop(call_id, None)
