@@ -40,19 +40,12 @@ from app.auth import (
     fallback_env_admin_user,
 )
 
-
-app = FastAPI(
-    title=APP_NAME,
-    version=APP_VERSION
-)
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 # -------------------------------------------------
 # LOGGING
 # -------------------------------------------------
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s %(message)s"
-)
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("gosonic")
 
 # Keep third-party SDK/client logs quiet in production.
@@ -65,10 +58,15 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 # -------------------------------------------------
 # Store IANA timezone names in the database. Display friendly labels in the dashboard.
 
+
 def normalize_timezone(value: str):
     if value in SUPPORTED_TIMEZONES:
         return value
-    return DEFAULT_CLIENT_TIMEZONE if DEFAULT_CLIENT_TIMEZONE in SUPPORTED_TIMEZONES else "America/New_York"
+    return (
+        DEFAULT_CLIENT_TIMEZONE
+        if DEFAULT_CLIENT_TIMEZONE in SUPPORTED_TIMEZONES
+        else "America/New_York"
+    )
 
 
 def timezone_label(value: str):
@@ -90,6 +88,7 @@ app.add_middleware(
 # ADMIN AUTH
 # -------------------------------------------------
 
+
 def require_webhook_secret(x_webhook_secret: str):
     """
     Optional shared-secret protection for Retell-facing webhooks.
@@ -104,16 +103,14 @@ def require_webhook_secret(x_webhook_secret: str):
         return True
 
     if not x_webhook_secret or x_webhook_secret != expected_secret:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid webhook secret"
-        )
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
     return True
 
 
-
-def verify_retell_signature(raw_body: str, signature: str, enforce_env: str = "RETELL_VERIFY_TRIAGE_SIGNATURE"):
+def verify_retell_signature(
+    raw_body: str, signature: str, enforce_env: str = "RETELL_VERIFY_TRIAGE_SIGNATURE"
+):
     """
     Verifies Retell-signed Custom Function requests using X-Retell-Signature.
 
@@ -129,7 +126,9 @@ def verify_retell_signature(raw_body: str, signature: str, enforce_env: str = "R
 
     if not api_key:
         logger.error("[RETELL SIGNATURE] RETELL_API_KEY not configured")
-        raise HTTPException(status_code=500, detail="Retell verification not configured")
+        raise HTTPException(
+            status_code=500, detail="Retell verification not configured"
+        )
 
     if not signature:
         logger.warning("[RETELL SIGNATURE] Missing X-Retell-Signature")
@@ -161,8 +160,9 @@ def verify_retell_signature(raw_body: str, signature: str, enforce_env: str = "R
     return True
 
 
-
-def observe_retell_signature(raw_body: str, signature: str, label: str = "[RETELL SIGNATURE OBSERVE]"):
+def observe_retell_signature(
+    raw_body: str, signature: str, label: str = "[RETELL SIGNATURE OBSERVE]"
+):
     """
     Passive Retell signature check for endpoints we are not enforcing yet.
 
@@ -203,6 +203,7 @@ def observe_retell_signature(raw_body: str, signature: str, label: str = "[RETEL
 
     logger.warning("%s Invalid signature", label)
     return {"present": True, "valid": False, "reason": "invalid_signature"}
+
 
 def mask_phone(phone: str):
     if not phone:
@@ -276,7 +277,7 @@ CLIENTS = {
     "hvac_toronto_001": {
         "business_name": "Toronto HVAC",
         "business_phone": "+14383896310",
-        "caller_enabled": True
+        "caller_enabled": True,
     }
 }
 
@@ -295,6 +296,7 @@ CALL_PHONE_META = {}
 # PASSWORD + SESSION HELPERS
 # -------------------------------------------------
 
+
 def get_user_by_email(email: str):
     database_url = DATABASE_URL
 
@@ -304,7 +306,8 @@ def get_user_by_email(email: str):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         u.id,
                         u.client_key,
@@ -320,7 +323,9 @@ def get_user_by_email(email: str):
                     LEFT JOIN clients c ON c.client_key = u.client_key
                     WHERE LOWER(u.email) = LOWER(%s)
                     LIMIT 1;
-                """, (email,))
+                """,
+                    (email,),
+                )
 
                 row = cur.fetchone()
 
@@ -339,7 +344,7 @@ def get_user_by_email(email: str):
             "business_name": row[8],
             "timezone": row[9],
             "timezone_label": timezone_label(row[9]),
-            "auth_source": "database"
+            "auth_source": "database",
         }
 
     except Exception as e:
@@ -357,14 +362,17 @@ def update_user_last_login(user_id: int):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE users
                     SET
                         last_login_at = NOW(),
                         updated_at = NOW()
                     WHERE id = %s
                     RETURNING last_login_at;
-                """, (user_id,))
+                """,
+                    (user_id,),
+                )
 
                 row = cur.fetchone()
 
@@ -388,25 +396,16 @@ async def auth_login(request: Request):
     password = data.get("password") or ""
 
     if not email or not password:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid credentials"
-        )
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     user = get_user_by_email(email)
 
     if user:
         if user.get("status") != "active":
-            raise HTTPException(
-                status_code=403,
-                detail="User account is inactive"
-            )
+            raise HTTPException(status_code=403, detail="User account is inactive")
 
         if not verify_password(password, user.get("password_hash")):
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid credentials"
-            )
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
         last_login_at = update_user_last_login(user.get("user_id"))
         if last_login_at:
@@ -418,10 +417,7 @@ async def auth_login(request: Request):
         user = fallback_env_admin_user(email)
 
         if not user or not admin_password or password != admin_password:
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid credentials"
-            )
+            raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_session_token(user)
 
@@ -439,11 +435,16 @@ async def auth_login(request: Request):
             "business_name": user.get("business_name"),
             "timezone": user.get("timezone"),
             "timezone_label": user.get("timezone_label"),
-            "last_login_at": user.get("last_login_at").isoformat() if user.get("last_login_at") else None,
-            "auth_source": user.get("auth_source")
+            "last_login_at": (
+                user.get("last_login_at").isoformat()
+                if user.get("last_login_at")
+                else None
+            ),
+            "auth_source": user.get("auth_source"),
         },
-        "email": user.get("email")
+        "email": user.get("email"),
     }
+
 
 # -------------------------------------------------
 # ADMIN SESSION TOKEN ENDPOINT
@@ -471,7 +472,7 @@ def auth_admin_token(x_admin_key: str = Header(None)):
         "business_name": os.getenv("ADMIN_COMPANY_NAME", "Gosonic"),
         "timezone": DEFAULT_CLIENT_TIMEZONE,
         "timezone_label": timezone_label(DEFAULT_CLIENT_TIMEZONE),
-        "auth_source": "admin_api_key"
+        "auth_source": "admin_api_key",
     }
 
     token = create_session_token(user)
@@ -490,9 +491,9 @@ def auth_admin_token(x_admin_key: str = Header(None)):
             "business_name": user.get("business_name"),
             "timezone": user.get("timezone"),
             "timezone_label": user.get("timezone_label"),
-            "auth_source": user.get("auth_source")
+            "auth_source": user.get("auth_source"),
         },
-        "email": user.get("email")
+        "email": user.get("email"),
     }
 
 
@@ -514,10 +515,11 @@ def auth_me(authorization: str = Header(None)):
             "role": payload.get("role"),
             "business_name": payload.get("business_name"),
             "timezone": payload.get("timezone"),
-            "timezone_label": timezone_label(payload.get("timezone"))
+            "timezone_label": timezone_label(payload.get("timezone")),
         },
-        "email": payload.get("email")
+        "email": payload.get("email"),
     }
+
 
 # -------------------------------------------------
 # SUPPORTED TIMEZONES
@@ -530,10 +532,10 @@ def get_supported_timezones(authorization: str = Header(None)):
         "status": "ok",
         "default_timezone": DEFAULT_CLIENT_TIMEZONE,
         "timezones": [
-            {"value": key, "label": label}
-            for key, label in SUPPORTED_TIMEZONES.items()
-        ]
+            {"value": key, "label": label} for key, label in SUPPORTED_TIMEZONES.items()
+        ],
     }
+
 
 # -------------------------------------------------
 # USERS READ ENDPOINT
@@ -569,7 +571,8 @@ def get_users(authorization: str = Header(None)):
                     """)
                 elif payload.get("role") == "client_admin":
                     effective_client_key = resolve_effective_client_key(payload)
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT
                             u.id,
                             u.client_key,
@@ -586,9 +589,12 @@ def get_users(authorization: str = Header(None)):
                         LEFT JOIN clients c ON c.client_key = u.client_key
                         WHERE u.client_key = %s
                         ORDER BY u.created_at ASC;
-                    """, (effective_client_key,))
+                    """,
+                        (effective_client_key,),
+                    )
                 elif payload.get("role") == "client_user":
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT
                             u.id,
                             u.client_key,
@@ -605,7 +611,9 @@ def get_users(authorization: str = Header(None)):
                         LEFT JOIN clients c ON c.client_key = u.client_key
                         WHERE u.id = %s
                         LIMIT 1;
-                    """, (payload.get("user_id"),))
+                    """,
+                        (payload.get("user_id"),),
+                    )
                 else:
                     raise HTTPException(status_code=403, detail="Unsupported user role")
 
@@ -614,26 +622,30 @@ def get_users(authorization: str = Header(None)):
         users = []
 
         for row in rows:
-            users.append({
-                "user_id": row[0],
-                "client_key": row[1],
-                "full_name": row[2],
-                "email": row[3],
-                "role": row[4],
-                "status": row[5],
-                "last_login_at": row[6].isoformat() if row[6] else None,
-                "created_at": row[7].isoformat() if row[7] else None,
-                "updated_at": row[8].isoformat() if row[8] else None,
-                "business_name": row[9],
-                "timezone": row[10],
-                "timezone_label": timezone_label(row[10])
-            })
+            users.append(
+                {
+                    "user_id": row[0],
+                    "client_key": row[1],
+                    "full_name": row[2],
+                    "email": row[3],
+                    "role": row[4],
+                    "status": row[5],
+                    "last_login_at": row[6].isoformat() if row[6] else None,
+                    "created_at": row[7].isoformat() if row[7] else None,
+                    "updated_at": row[8].isoformat() if row[8] else None,
+                    "business_name": row[9],
+                    "timezone": row[10],
+                    "timezone_label": timezone_label(row[10]),
+                }
+            )
 
         return {
             "status": "ok",
             "count": len(users),
-            "scope": "platform" if is_platform_admin(payload) else payload.get("client_key"),
-            "users": users
+            "scope": (
+                "platform" if is_platform_admin(payload) else payload.get("client_key")
+            ),
+            "users": users,
         }
 
     except HTTPException:
@@ -675,7 +687,9 @@ def require_client_scoped_payload(authorization: str):
         raise HTTPException(status_code=403, detail="Client account access required")
 
     if not payload.get("client_key"):
-        raise HTTPException(status_code=403, detail="Client account is not scoped to a client")
+        raise HTTPException(
+            status_code=403, detail="Client account is not scoped to a client"
+        )
 
     return payload
 
@@ -701,7 +715,9 @@ def resolve_effective_client_key(payload: dict, requested_client_key: str = None
         raise HTTPException(status_code=403, detail="User is not assigned to a client")
 
     if requested_client_key and requested_client_key != user_client_key:
-        raise HTTPException(status_code=403, detail="Access denied for requested client")
+        raise HTTPException(
+            status_code=403, detail="Access denied for requested client"
+        )
 
     return user_client_key
 
@@ -737,8 +753,7 @@ def normalize_email(value: str):
 def validate_password_strength(password: str):
     if not password or len(password) < 12:
         raise HTTPException(
-            status_code=400,
-            detail="Password must be at least 12 characters"
+            status_code=400, detail="Password must be at least 12 characters"
         )
 
     return True
@@ -753,12 +768,15 @@ def client_exists(client_key: str):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT 1
                     FROM clients
                     WHERE client_key = %s
                     LIMIT 1;
-                """, (client_key,))
+                """,
+                    (client_key,),
+                )
 
                 return cur.fetchone() is not None
 
@@ -780,7 +798,7 @@ def build_user_response(row):
         "updated_at": row[8].isoformat() if row[8] else None,
         "business_name": row[9],
         "timezone": row[10],
-        "timezone_label": timezone_label(row[10])
+        "timezone_label": timezone_label(row[10]),
     }
 
 
@@ -821,7 +839,9 @@ async def create_user(request: Request, authorization: str = Header(None)):
 
     if role in {"client_admin", "client_user"}:
         if not client_key:
-            raise HTTPException(status_code=400, detail="client_key is required for client users")
+            raise HTTPException(
+                status_code=400, detail="client_key is required for client users"
+            )
 
         if not client_exists(client_key):
             raise HTTPException(status_code=404, detail="client_key not found")
@@ -832,7 +852,8 @@ async def create_user(request: Request, authorization: str = Header(None)):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO users (
                         client_key,
                         full_name,
@@ -843,18 +864,21 @@ async def create_user(request: Request, authorization: str = Header(None)):
                     )
                     VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING id;
-                """, (
-                    client_key,
-                    full_name,
-                    email,
-                    hash_password(password),
-                    role,
-                    status
-                ))
+                """,
+                    (
+                        client_key,
+                        full_name,
+                        email,
+                        hash_password(password),
+                        role,
+                        status,
+                    ),
+                )
 
                 created = cur.fetchone()
 
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         u.id,
                         u.client_key,
@@ -871,18 +895,22 @@ async def create_user(request: Request, authorization: str = Header(None)):
                     LEFT JOIN clients c ON c.client_key = u.client_key
                     WHERE u.id = %s
                     LIMIT 1;
-                """, (created[0],))
+                """,
+                    (created[0],),
+                )
 
                 row = cur.fetchone()
 
             conn.commit()
 
-        logger.info("[USER CREATED] user_id=%s role=%s client_key=%s", row[0], role, client_key)
+        logger.info(
+            "[USER CREATED] user_id=%s role=%s client_key=%s", row[0], role, client_key
+        )
 
         return {
             "status": "ok",
             "message": "User created",
-            "user": build_user_response(row)
+            "user": build_user_response(row),
         }
 
     except psycopg.errors.UniqueViolation:
@@ -922,14 +950,17 @@ async def update_user_status(request: Request, authorization: str = Header(None)
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE users
                     SET
                         status = %s,
                         updated_at = NOW()
                     WHERE id = %s
                     RETURNING id;
-                """, (status, user_id))
+                """,
+                    (status, user_id),
+                )
 
                 updated = cur.fetchone()
 
@@ -944,7 +975,7 @@ async def update_user_status(request: Request, authorization: str = Header(None)
             "status": "ok",
             "message": "User status updated",
             "user_id": user_id,
-            "user_status": status
+            "user_status": status,
         }
 
     except HTTPException:
@@ -980,14 +1011,17 @@ async def reset_user_password(request: Request, authorization: str = Header(None
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE users
                     SET
                         password_hash = %s,
                         updated_at = NOW()
                     WHERE id = %s
                     RETURNING id;
-                """, (hash_password(new_password), user_id))
+                """,
+                    (hash_password(new_password), user_id),
+                )
 
                 updated = cur.fetchone()
 
@@ -998,11 +1032,7 @@ async def reset_user_password(request: Request, authorization: str = Header(None
 
         logger.info("[USER PASSWORD RESET] user_id=%s", user_id)
 
-        return {
-            "status": "ok",
-            "message": "User password updated",
-            "user_id": user_id
-        }
+        return {"status": "ok", "message": "User password updated", "user_id": user_id}
 
     except HTTPException:
         raise
@@ -1010,6 +1040,7 @@ async def reset_user_password(request: Request, authorization: str = Header(None
     except Exception as e:
         logger.exception("User password reset failed")
         return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # HEALTH CHECK
@@ -1030,7 +1061,7 @@ def db_check():
         return {
             "status": "error",
             "database": "not_configured",
-            "message": "DATABASE_URL not configured"
+            "message": "DATABASE_URL not configured",
         }
 
     try:
@@ -1039,19 +1070,11 @@ def db_check():
                 cur.execute("SELECT 1;")
                 result = cur.fetchone()
 
-        return {
-            "status": "ok",
-            "database": "connected",
-            "result": result[0]
-        }
+        return {"status": "ok", "database": "connected", "result": result[0]}
 
     except Exception as e:
         logger.exception("DB check failed")
-        return {
-            "status": "error",
-            "database": "connection_failed",
-            "message": str(e)
-        }
+        return {"status": "error", "database": "connection_failed", "message": str(e)}
 
 
 # -------------------------------------------------
@@ -1064,16 +1087,13 @@ def init_db(x_admin_key: str = Header(None)):
     if os.getenv("ALLOW_DB_INIT", "false").lower() != "true":
         raise HTTPException(
             status_code=403,
-            detail="Database initialization endpoint is disabled. Set ALLOW_DB_INIT=true temporarily to use it."
+            detail="Database initialization endpoint is disabled. Set ALLOW_DB_INIT=true temporarily to use it.",
         )
 
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     try:
         with psycopg.connect(database_url) as conn:
@@ -1255,6 +1275,51 @@ def init_db(x_admin_key: str = Header(None)):
                 cur.execute("""
                     ALTER TABLE calls
                     ADD COLUMN IF NOT EXISTS billable_minutes NUMERIC(10,2) NOT NULL DEFAULT 0;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS call_status TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS webhook_status TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS agent_id TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS call_direction TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS confidence NUMERIC(5,4);
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS processing_latency_ms INTEGER;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS escalation_reason TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS transcript TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
                 """)
 
                 # -------------------------------------------------
@@ -1467,17 +1532,21 @@ def init_db(x_admin_key: str = Header(None)):
                 admin_full_name = os.getenv("ADMIN_FULL_NAME", "Gosonic Admin")
 
                 if admin_email and admin_password:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT id
                         FROM users
                         WHERE LOWER(email) = LOWER(%s)
                         LIMIT 1;
-                    """, (admin_email,))
+                    """,
+                        (admin_email,),
+                    )
 
                     existing_user = cur.fetchone()
 
                     if not existing_user:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             INSERT INTO users (
                                 client_key,
                                 full_name,
@@ -1487,14 +1556,16 @@ def init_db(x_admin_key: str = Header(None)):
                                 status
                             )
                             VALUES (%s, %s, %s, %s, %s, %s);
-                        """, (
-                            None,
-                            admin_full_name,
-                            admin_email.lower(),
-                            hash_password(admin_password),
-                            "platform_admin",
-                            "active"
-                        ))
+                        """,
+                            (
+                                None,
+                                admin_full_name,
+                                admin_email.lower(),
+                                hash_password(admin_password),
+                                "platform_admin",
+                                "active",
+                            ),
+                        )
 
             conn.commit()
 
@@ -1507,45 +1578,37 @@ def init_db(x_admin_key: str = Header(None)):
                 "client_contacts",
                 "client_addresses",
                 "users",
-                "calls"
+                "calls",
             ],
             "routing_enabled": True,
             "settings_enabled": True,
-            "seed_client": "hvac_toronto_001"
+            "seed_client": "hvac_toronto_001",
         }
 
     except Exception as e:
         logger.exception("Database initialization failed")
 
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 # -------------------------------------------------
 # CLIENTS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/clients")
-def get_clients(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
-):
+def get_clients(client_key: str = Query(None), authorization: str = Header(None)):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
                 where_sql, params = scoped_where_clause("clients", effective_client_key)
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     SELECT
                         client_key,
                         business_name,
@@ -1561,34 +1624,38 @@ def get_clients(
                     FROM clients
                     {where_sql}
                     ORDER BY created_at ASC;
-                """, params)
+                """,
+                    params,
+                )
 
                 rows = cur.fetchall()
 
         clients = []
 
         for row in rows:
-            clients.append({
-                "client_key": row[0],
-                "business_name": row[1],
-                "vertical": row[2],
-                "plan_tier": row[3],
-                "inbound_phone": row[4],
-                "business_phone": row[5],
-                "caller_sms_enabled": row[6],
-                "status": row[7],
-                "timezone": row[8],
-                "timezone_label": timezone_label(row[8]),
-                "created_at": row[9].isoformat() if row[9] else None,
-                "updated_at": row[10].isoformat() if row[10] else None
-            })
+            clients.append(
+                {
+                    "client_key": row[0],
+                    "business_name": row[1],
+                    "vertical": row[2],
+                    "plan_tier": row[3],
+                    "inbound_phone": row[4],
+                    "business_phone": row[5],
+                    "caller_sms_enabled": row[6],
+                    "status": row[7],
+                    "timezone": row[8],
+                    "timezone_label": timezone_label(row[8]),
+                    "created_at": row[9].isoformat() if row[9] else None,
+                    "updated_at": row[10].isoformat() if row[10] else None,
+                }
+            )
 
         return {
             "status": "ok",
             "count": len(clients),
             "scope": "platform" if is_platform_admin(payload) else effective_client_key,
             "client_key_filter": effective_client_key,
-            "clients": clients
+            "clients": clients,
         }
 
     except HTTPException:
@@ -1596,10 +1663,7 @@ def get_clients(
 
     except Exception as e:
         logger.exception("Clients read failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 # -------------------------------------------------
@@ -1612,10 +1676,7 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     data = await request.json()
 
@@ -1649,19 +1710,17 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
     if not client_key or not business_name:
         return {
             "status": "error",
-            "message": "client_key and business_name are required"
+            "message": "client_key and business_name are required",
         }
 
     if not inbound_phone:
-        return {
-            "status": "error",
-            "message": "valid inbound_phone is required"
-        }
+        return {"status": "error", "message": "valid inbound_phone is required"}
 
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO clients (
                         client_key,
                         business_name,
@@ -1675,15 +1734,17 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, TRUE, 'active', %s)
                     ON CONFLICT (client_key) DO NOTHING;
-                """, (
-                    client_key,
-                    business_name,
-                    vertical,
-                    plan_tier,
-                    inbound_phone,
-                    business_phone,
-                    timezone
-                ))
+                """,
+                    (
+                        client_key,
+                        business_name,
+                        vertical,
+                        plan_tier,
+                        inbound_phone,
+                        business_phone,
+                        timezone,
+                    ),
+                )
 
                 client_created = cur.rowcount
 
@@ -1691,10 +1752,11 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                     return {
                         "status": "error",
                         "message": "client_key already exists",
-                        "client_key": client_key
+                        "client_key": client_key,
                     }
 
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO client_settings (
                         client_key,
                         greeting_enabled,
@@ -1724,17 +1786,16 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                         %s
                     )
                     ON CONFLICT (client_key) DO NOTHING;
-                """, (
-                    client_key,
-                    inbound_phone,
-                    TWILIO_PHONE
-                ))
+                """,
+                    (client_key, inbound_phone, TWILIO_PHONE),
+                )
 
                 # -------------------------------------------------
                 # CREATE PRIMARY CLIENT CONTACT
                 # -------------------------------------------------
                 if first_name or last_name or email or contact_phone:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO client_contacts (
                             client_key,
                             first_name,
@@ -1745,20 +1806,16 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                             is_primary
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, TRUE);
-                    """, (
-                        client_key,
-                        first_name,
-                        last_name,
-                        email,
-                        contact_phone,
-                        role
-                    ))
+                    """,
+                        (client_key, first_name, last_name, email, contact_phone, role),
+                    )
 
                 # -------------------------------------------------
                 # CREATE PRIMARY CLIENT ADDRESS
                 # -------------------------------------------------
                 if address_line_1 or city or state_province or postal_code:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         INSERT INTO client_addresses (
                             client_key,
                             address_line_1,
@@ -1770,15 +1827,17 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                             is_primary
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE);
-                    """, (
-                        client_key,
-                        address_line_1,
-                        address_line_2,
-                        city,
-                        state_province,
-                        postal_code,
-                        country
-                    ))
+                    """,
+                        (
+                            client_key,
+                            address_line_1,
+                            address_line_2,
+                            city,
+                            state_province,
+                            postal_code,
+                            country,
+                        ),
+                    )
 
             conn.commit()
 
@@ -1798,7 +1857,7 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                     "last_name": last_name,
                     "email": email,
                     "phone": contact_phone,
-                    "role": role
+                    "role": role,
                 },
                 "address": {
                     "address_line_1": address_line_1,
@@ -1806,41 +1865,34 @@ async def create_client(request: Request, x_admin_key: str = Header(None)):
                     "city": city,
                     "state_province": state_province,
                     "postal_code": postal_code,
-                    "country": country
-                }
-            }
+                    "country": country,
+                },
+            },
         }
 
     except Exception as e:
         logger.exception("Client create failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # CALLS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/calls")
-def get_calls(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
-):
+def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
                 where_sql, params = scoped_where_clause("calls", effective_client_key)
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     SELECT
                         call_id,
                         client_key,
@@ -1856,42 +1908,68 @@ def get_calls(
                         business_error,
                         caller_notified,
                         caller_error,
+                        call_duration_seconds,
+                        billable_minutes,
+                        call_status,
+                        webhook_status,
+                        agent_id,
+                        call_direction,
+                        confidence,
+                        processing_latency_ms,
+                        escalation_reason,
+                        transcript,
+                        ended_at,
                         created_at
                     FROM calls
                     {where_sql}
                     ORDER BY created_at DESC
                     LIMIT 50;
-                """, params)
+                """,
+                    params,
+                )
 
                 rows = cur.fetchall()
 
         calls = []
 
         for row in rows:
-            calls.append({
-                "call_id": row[0],
-                "client_key": row[1],
-                "caller_name": row[2],
-                "caller_phone": row[3],
-                "service_address": row[4],
-                "issue_description": row[5],
-                "issue_type": row[6],
-                "urgency": row[7],
-                "call_outcome": row[8],
-                "sms_policy_reason": row[9],
-                "business_notified": row[10],
-                "business_error": row[11],
-                "caller_notified": row[12],
-                "caller_error": row[13],
-                "created_at": row[14].isoformat() if row[14] else None
-            })
+            calls.append(
+                {
+                    "call_id": row[0],
+                    "client_key": row[1],
+                    "caller_name": row[2],
+                    "caller_phone": row[3],
+                    "service_address": row[4],
+                    "issue_description": row[5],
+                    "issue_type": row[6],
+                    "urgency": row[7],
+                    "call_outcome": row[8],
+                    "sms_policy_reason": row[9],
+                    "business_notified": row[10],
+                    "business_error": row[11],
+                    "caller_notified": row[12],
+                    "caller_error": row[13],
+                    "call_duration_seconds": row[14],
+                    "billable_minutes": float(row[15] or 0),
+                    "call_status": row[16],
+                    "webhook_status": row[17],
+                    "agent_id": row[18],
+                    "call_direction": row[19],
+                    "confidence": float(row[20]) if row[20] is not None else None,
+                    "processing_latency_ms": row[21],
+                    "escalation_reason": row[22],
+                    "transcript": row[23],
+                    "ended_at": row[24].isoformat() if row[24] else None,
+                    "created_at": row[25].isoformat() if row[25] else None
+                }
+            )
 
         return {
             "status": "ok",
             "count": len(calls),
             "scope": "platform" if is_platform_admin(payload) else effective_client_key,
             "client_key_filter": effective_client_key,
-            "calls": calls
+            "calls": calls,
         }
 
     except HTTPException:
@@ -1899,18 +1977,15 @@ def get_calls(
 
     except Exception as e:
         logger.exception("Calls read failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
-    
+        return {"status": "error", "message": str(e)}
+
+
 # -------------------------------------------------
 # CLIENT ACCOUNT ENDPOINT
 # -------------------------------------------------
 @app.get("/client/account")
 def get_client_account(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
+    client_key: str = Query(None), authorization: str = Header(None)
 ):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
@@ -1918,15 +1993,11 @@ def get_client_account(
 
     if not effective_client_key:
         raise HTTPException(
-            status_code=400,
-            detail="client_key is required for account view"
+            status_code=400, detail="client_key is required for account view"
         )
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     try:
         with psycopg.connect(database_url) as conn:
@@ -1934,7 +2005,8 @@ def get_client_account(
                 # -------------------------------------------------
                 # CLIENT
                 # -------------------------------------------------
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         client_key,
                         business_name,
@@ -1946,7 +2018,9 @@ def get_client_account(
                     FROM clients
                     WHERE client_key = %s
                     LIMIT 1;
-                """, (effective_client_key,))
+                """,
+                    (effective_client_key,),
+                )
 
                 client_row = cur.fetchone()
 
@@ -1956,7 +2030,8 @@ def get_client_account(
                 # -------------------------------------------------
                 # ACTIVE PLAN
                 # -------------------------------------------------
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         plan_name,
                         concurrent_call_limit,
@@ -1969,12 +2044,16 @@ def get_client_account(
                       AND active = TRUE
                     ORDER BY created_at DESC
                     LIMIT 1;
-                """, (effective_client_key,))
+                """,
+                    (effective_client_key,),
+                )
 
                 plan_row = cur.fetchone()
 
                 if not plan_row:
-                    raise HTTPException(status_code=404, detail="active client plan not found")
+                    raise HTTPException(
+                        status_code=404, detail="active client plan not found"
+                    )
 
                 plan_name = plan_row[0]
                 concurrent_call_limit = plan_row[1]
@@ -1992,10 +2071,7 @@ def get_client_account(
                 anchor_day = max(1, min(anchor_day, 28))
 
                 current_start = datetime(
-                    now.year,
-                    now.month,
-                    anchor_day,
-                    tzinfo=timezone.utc
+                    now.year, now.month, anchor_day, tzinfo=timezone.utc
                 )
 
                 if now < current_start:
@@ -2007,10 +2083,7 @@ def get_client_account(
                         previous_year -= 1
 
                     current_start = datetime(
-                        previous_year,
-                        previous_month,
-                        anchor_day,
-                        tzinfo=timezone.utc
+                        previous_year, previous_month, anchor_day, tzinfo=timezone.utc
                     )
 
                 next_month = current_start.month + 1
@@ -2021,10 +2094,7 @@ def get_client_account(
                     next_year += 1
 
                 next_start = datetime(
-                    next_year,
-                    next_month,
-                    anchor_day,
-                    tzinfo=timezone.utc
+                    next_year, next_month, anchor_day, tzinfo=timezone.utc
                 )
 
                 current_end = next_start - timedelta(seconds=1)
@@ -2032,7 +2102,8 @@ def get_client_account(
                 # -------------------------------------------------
                 # USAGE SUMMARY
                 # -------------------------------------------------
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         COALESCE(SUM(billable_minutes), 0),
                         COUNT(*)
@@ -2040,11 +2111,9 @@ def get_client_account(
                     WHERE client_key = %s
                       AND created_at >= %s
                       AND created_at < %s;
-                """, (
-                    effective_client_key,
-                    current_start,
-                    next_start
-                ))
+                """,
+                    (effective_client_key, current_start, next_start),
+                )
 
                 usage_row = cur.fetchone()
 
@@ -2059,14 +2128,14 @@ def get_client_account(
                     remaining_minutes = max(float(included_minutes) - minutes_used, 0)
                     overage_minutes = max(minutes_used - float(included_minutes), 0)
                     estimated_overage = round(
-                        overage_minutes * float(overage_rate or 0),
-                        2
+                        overage_minutes * float(overage_rate or 0), 2
                     )
 
                 # -------------------------------------------------
                 # INVOICE HISTORY
                 # -------------------------------------------------
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         invoice_number,
                         billing_period_start,
@@ -2086,29 +2155,33 @@ def get_client_account(
                     WHERE client_key = %s
                     ORDER BY issue_date DESC
                     LIMIT 12;
-                """, (effective_client_key,))
+                """,
+                    (effective_client_key,),
+                )
 
                 invoice_rows = cur.fetchall()
 
         invoices = []
 
         for row in invoice_rows:
-            invoices.append({
-                "invoice_number": row[0],
-                "billing_period_start": row[1].isoformat() if row[1] else None,
-                "billing_period_end": row[2].isoformat() if row[2] else None,
-                "issue_date": row[3].isoformat() if row[3] else None,
-                "due_date": row[4].isoformat() if row[4] else None,
-                "subtotal": float(row[5] or 0),
-                "tax": float(row[6] or 0),
-                "total": float(row[7] or 0),
-                "status": row[8],
-                "minutes_included": row[9],
-                "minutes_used": float(row[10] or 0),
-                "overage_minutes": float(row[11] or 0),
-                "overage_rate": float(row[12]) if row[12] is not None else None,
-                "pdf_url": row[13]
-            })
+            invoices.append(
+                {
+                    "invoice_number": row[0],
+                    "billing_period_start": row[1].isoformat() if row[1] else None,
+                    "billing_period_end": row[2].isoformat() if row[2] else None,
+                    "issue_date": row[3].isoformat() if row[3] else None,
+                    "due_date": row[4].isoformat() if row[4] else None,
+                    "subtotal": float(row[5] or 0),
+                    "tax": float(row[6] or 0),
+                    "total": float(row[7] or 0),
+                    "status": row[8],
+                    "minutes_included": row[9],
+                    "minutes_used": float(row[10] or 0),
+                    "overage_minutes": float(row[11] or 0),
+                    "overage_rate": float(row[12]) if row[12] is not None else None,
+                    "pdf_url": row[13],
+                }
+            )
 
         return {
             "status": "ok",
@@ -2120,7 +2193,7 @@ def get_client_account(
                 "status": client_row[4],
                 "timezone": client_row[5],
                 "timezone_label": timezone_label(client_row[5]),
-                "created_at": client_row[6].isoformat() if client_row[6] else None
+                "created_at": client_row[6].isoformat() if client_row[6] else None,
             },
             "plan": {
                 "plan_name": plan_name,
@@ -2128,22 +2201,28 @@ def get_client_account(
                 "included_minutes": included_minutes,
                 "overage_rate": overage_rate,
                 "billing_anchor_day": billing_anchor_day,
-                "activation_date": activation_date.isoformat() if activation_date else None
+                "activation_date": (
+                    activation_date.isoformat() if activation_date else None
+                ),
             },
             "billing_period": {
                 "start": current_start.isoformat(),
                 "end": current_end.isoformat(),
-                "next_start": next_start.isoformat()
+                "next_start": next_start.isoformat(),
             },
             "usage": {
                 "call_count": call_count,
                 "minutes_used": round(minutes_used, 2),
                 "included_minutes": included_minutes,
-                "remaining_minutes": round(remaining_minutes, 2) if remaining_minutes is not None else None,
+                "remaining_minutes": (
+                    round(remaining_minutes, 2)
+                    if remaining_minutes is not None
+                    else None
+                ),
                 "overage_minutes": round(overage_minutes, 2),
-                "estimated_overage": estimated_overage
+                "estimated_overage": estimated_overage,
             },
-            "invoice_history": invoices
+            "invoice_history": invoices,
         }
 
     except HTTPException:
@@ -2151,10 +2230,8 @@ def get_client_account(
 
     except Exception as e:
         logger.exception("Client account read failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # INVOICE GENERATION ENDPOINT
@@ -2180,7 +2257,8 @@ async def generate_current_invoice(request: Request, authorization: str = Header
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         plan_name,
                         included_minutes,
@@ -2191,12 +2269,16 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                       AND active = TRUE
                     ORDER BY created_at DESC
                     LIMIT 1;
-                """, (client_key,))
+                """,
+                    (client_key,),
+                )
 
                 plan = cur.fetchone()
 
                 if not plan:
-                    raise HTTPException(status_code=404, detail="active client plan not found")
+                    raise HTTPException(
+                        status_code=404, detail="active client plan not found"
+                    )
 
                 plan_name = plan[0]
                 included_minutes = plan[1] or 0
@@ -2206,7 +2288,9 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                 now = datetime.now(timezone.utc)
                 anchor_day = max(1, min(billing_anchor_day, 28))
 
-                period_start = datetime(now.year, now.month, anchor_day, tzinfo=timezone.utc)
+                period_start = datetime(
+                    now.year, now.month, anchor_day, tzinfo=timezone.utc
+                )
 
                 if now < period_start:
                     previous_month = now.month - 1
@@ -2216,7 +2300,9 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                         previous_month = 12
                         previous_year -= 1
 
-                    period_start = datetime(previous_year, previous_month, anchor_day, tzinfo=timezone.utc)
+                    period_start = datetime(
+                        previous_year, previous_month, anchor_day, tzinfo=timezone.utc
+                    )
 
                 next_month = period_start.month + 1
                 next_year = period_start.year
@@ -2225,18 +2311,23 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                     next_month = 1
                     next_year += 1
 
-                period_end_exclusive = datetime(next_year, next_month, anchor_day, tzinfo=timezone.utc)
+                period_end_exclusive = datetime(
+                    next_year, next_month, anchor_day, tzinfo=timezone.utc
+                )
                 period_end_display = period_end_exclusive - timedelta(seconds=1)
 
                 # Prevent duplicate invoice snapshots for same client + period.
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT id, invoice_number
                     FROM invoices
                     WHERE client_key = %s
                       AND billing_period_start = %s
                       AND billing_period_end = %s
                     LIMIT 1;
-                """, (client_key, period_start, period_end_display))
+                """,
+                    (client_key, period_start, period_end_display),
+                )
 
                 existing = cur.fetchone()
 
@@ -2246,10 +2337,11 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                         "message": "Invoice already exists for this billing period",
                         "invoice_id": existing[0],
                         "invoice_number": existing[1],
-                        "created": False
+                        "created": False,
                     }
 
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         COALESCE(SUM(billable_minutes), 0),
                         COUNT(*)
@@ -2257,15 +2349,21 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                     WHERE client_key = %s
                       AND created_at >= %s
                       AND created_at < %s;
-                """, (client_key, period_start, period_end_exclusive))
+                """,
+                    (client_key, period_start, period_end_exclusive),
+                )
 
                 usage = cur.fetchone()
 
                 minutes_used = Decimal(str(usage[0] or 0))
                 call_count = int(usage[1] or 0)
 
-                overage_minutes = max(minutes_used - Decimal(str(included_minutes)), Decimal("0"))
-                overage_amount = (overage_minutes * overage_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                overage_minutes = max(
+                    minutes_used - Decimal(str(included_minutes)), Decimal("0")
+                )
+                overage_amount = (overage_minutes * overage_rate).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
 
                 subtotal = overage_amount
                 tax = Decimal("0.00")
@@ -2275,7 +2373,8 @@ async def generate_current_invoice(request: Request, authorization: str = Header
 
                 due_date = now + timedelta(days=15)
 
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO invoices (
                         invoice_number,
                         client_key,
@@ -2294,25 +2393,28 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                     )
                     VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s, 'issued', %s, %s, %s, %s)
                     RETURNING id;
-                """, (
-                    invoice_number,
-                    client_key,
-                    period_start,
-                    period_end_display,
-                    due_date,
-                    subtotal,
-                    tax,
-                    total,
-                    included_minutes,
-                    minutes_used,
-                    overage_minutes,
-                    overage_rate
-                ))
+                """,
+                    (
+                        invoice_number,
+                        client_key,
+                        period_start,
+                        period_end_display,
+                        due_date,
+                        subtotal,
+                        tax,
+                        total,
+                        included_minutes,
+                        minutes_used,
+                        overage_minutes,
+                        overage_rate,
+                    ),
+                )
 
                 invoice = cur.fetchone()
                 invoice_id = invoice[0]
 
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO invoice_line_items (
                         invoice_id,
                         description,
@@ -2321,13 +2423,15 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                         amount
                     )
                     VALUES (%s, %s, %s, %s, %s);
-                """, (
-                    invoice_id,
-                    f"{plan_name} usage overage",
-                    overage_minutes,
-                    overage_rate,
-                    overage_amount
-                ))
+                """,
+                    (
+                        invoice_id,
+                        f"{plan_name} usage overage",
+                        overage_minutes,
+                        overage_rate,
+                        overage_amount,
+                    ),
+                )
 
             conn.commit()
 
@@ -2349,8 +2453,8 @@ async def generate_current_invoice(request: Request, authorization: str = Header
                 "subtotal": float(subtotal),
                 "tax": float(tax),
                 "total": float(total),
-                "status": "issued"
-            }
+                "status": "issued",
+            },
         }
 
     except HTTPException:
@@ -2360,14 +2464,12 @@ async def generate_current_invoice(request: Request, authorization: str = Header
         logger.exception("Invoice generation failed")
         return {"status": "error", "message": str(e)}
 
+
 # -------------------------------------------------
 # INVOICES READ ENDPOINT
 # -------------------------------------------------
 @app.get("/invoices")
-def get_invoices(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
-):
+def get_invoices(client_key: str = Query(None), authorization: str = Header(None)):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
@@ -2378,9 +2480,12 @@ def get_invoices(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                where_sql, params = scoped_where_clause("invoices", effective_client_key)
+                where_sql, params = scoped_where_clause(
+                    "invoices", effective_client_key
+                )
 
-                cur.execute(f"""
+                cur.execute(
+                    f"""
                     SELECT
                         id,
                         invoice_number,
@@ -2404,40 +2509,44 @@ def get_invoices(
                     {where_sql}
                     ORDER BY issue_date DESC
                     LIMIT 100;
-                """, params)
+                """,
+                    params,
+                )
 
                 rows = cur.fetchall()
 
         invoices = []
 
         for row in rows:
-            invoices.append({
-                "invoice_id": row[0],
-                "invoice_number": row[1],
-                "client_key": row[2],
-                "billing_period_start": row[3].isoformat() if row[3] else None,
-                "billing_period_end": row[4].isoformat() if row[4] else None,
-                "issue_date": row[5].isoformat() if row[5] else None,
-                "due_date": row[6].isoformat() if row[6] else None,
-                "subtotal": float(row[7] or 0),
-                "tax": float(row[8] or 0),
-                "total": float(row[9] or 0),
-                "status": row[10],
-                "minutes_included": row[11],
-                "minutes_used": float(row[12] or 0),
-                "overage_minutes": float(row[13] or 0),
-                "overage_rate": float(row[14]) if row[14] is not None else None,
-                "pdf_url": row[15],
-                "created_at": row[16].isoformat() if row[16] else None,
-                "updated_at": row[17].isoformat() if row[17] else None
-            })
+            invoices.append(
+                {
+                    "invoice_id": row[0],
+                    "invoice_number": row[1],
+                    "client_key": row[2],
+                    "billing_period_start": row[3].isoformat() if row[3] else None,
+                    "billing_period_end": row[4].isoformat() if row[4] else None,
+                    "issue_date": row[5].isoformat() if row[5] else None,
+                    "due_date": row[6].isoformat() if row[6] else None,
+                    "subtotal": float(row[7] or 0),
+                    "tax": float(row[8] or 0),
+                    "total": float(row[9] or 0),
+                    "status": row[10],
+                    "minutes_included": row[11],
+                    "minutes_used": float(row[12] or 0),
+                    "overage_minutes": float(row[13] or 0),
+                    "overage_rate": float(row[14]) if row[14] is not None else None,
+                    "pdf_url": row[15],
+                    "created_at": row[16].isoformat() if row[16] else None,
+                    "updated_at": row[17].isoformat() if row[17] else None,
+                }
+            )
 
         return {
             "status": "ok",
             "count": len(invoices),
             "scope": "platform" if is_platform_admin(payload) else effective_client_key,
             "client_key_filter": effective_client_key,
-            "invoices": invoices
+            "invoices": invoices,
         }
 
     except HTTPException:
@@ -2453,8 +2562,7 @@ def get_invoices(
 # -------------------------------------------------
 @app.get("/invoices/detail")
 def get_invoice_detail(
-    invoice_number: str = Query(None),
-    authorization: str = Header(None)
+    invoice_number: str = Query(None), authorization: str = Header(None)
 ):
     payload = require_auth_token(authorization)
     database_url = os.getenv("DATABASE_URL")
@@ -2468,7 +2576,8 @@ def get_invoice_detail(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         id,
                         invoice_number,
@@ -2491,7 +2600,9 @@ def get_invoice_detail(
                     FROM invoices
                     WHERE invoice_number = %s
                     LIMIT 1;
-                """, (invoice_number,))
+                """,
+                    (invoice_number,),
+                )
 
                 row = cur.fetchone()
 
@@ -2499,14 +2610,19 @@ def get_invoice_detail(
                     raise HTTPException(status_code=404, detail="invoice not found")
 
                 invoice_client_key = row[2]
-                effective_client_key = resolve_effective_client_key(payload, invoice_client_key)
+                effective_client_key = resolve_effective_client_key(
+                    payload, invoice_client_key
+                )
 
                 if effective_client_key != invoice_client_key:
-                    raise HTTPException(status_code=403, detail="Access denied for invoice")
+                    raise HTTPException(
+                        status_code=403, detail="Access denied for invoice"
+                    )
 
                 invoice_id = row[0]
 
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         id,
                         description,
@@ -2517,21 +2633,25 @@ def get_invoice_detail(
                     FROM invoice_line_items
                     WHERE invoice_id = %s
                     ORDER BY id ASC;
-                """, (invoice_id,))
+                """,
+                    (invoice_id,),
+                )
 
                 line_rows = cur.fetchall()
 
         line_items = []
 
         for item in line_rows:
-            line_items.append({
-                "line_item_id": item[0],
-                "description": item[1],
-                "quantity": float(item[2] or 0),
-                "unit_price": float(item[3] or 0),
-                "amount": float(item[4] or 0),
-                "created_at": item[5].isoformat() if item[5] else None
-            })
+            line_items.append(
+                {
+                    "line_item_id": item[0],
+                    "description": item[1],
+                    "quantity": float(item[2] or 0),
+                    "unit_price": float(item[3] or 0),
+                    "amount": float(item[4] or 0),
+                    "created_at": item[5].isoformat() if item[5] else None,
+                }
+            )
 
         return {
             "status": "ok",
@@ -2553,9 +2673,9 @@ def get_invoice_detail(
                 "overage_rate": float(row[14]) if row[14] is not None else None,
                 "pdf_url": row[15],
                 "created_at": row[16].isoformat() if row[16] else None,
-                "updated_at": row[17].isoformat() if row[17] else None
+                "updated_at": row[17].isoformat() if row[17] else None,
             },
-            "line_items": line_items
+            "line_items": line_items,
         }
 
     except HTTPException:
@@ -2565,29 +2685,29 @@ def get_invoice_detail(
         logger.exception("Invoice detail read failed")
         return {"status": "error", "message": str(e)}
 
+
 # -------------------------------------------------
 # CLIENT SETTINGS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/client-settings")
 def get_client_settings(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
+    client_key: str = Query(None), authorization: str = Header(None)
 ):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                where_sql, params = scoped_where_clause("client_settings", effective_client_key)
-                cur.execute(f"""
+                where_sql, params = scoped_where_clause(
+                    "client_settings", effective_client_key
+                )
+                cur.execute(
+                    f"""
                     SELECT
                         client_key,
                         greeting_enabled,
@@ -2609,39 +2729,43 @@ def get_client_settings(
                     FROM client_settings
                     {where_sql}
                     ORDER BY created_at ASC;
-                """, params)
+                """,
+                    params,
+                )
 
                 rows = cur.fetchall()
 
         settings = []
 
         for row in rows:
-            settings.append({
-                "client_key": row[0],
-                "greeting_enabled": row[1],
-                "custom_greeting": row[2],
-                "end_call_enabled": row[3],
-                "custom_end_call": row[4],
-                "caller_confirmation_enabled": row[5],
-                "business_sms_enabled": row[6],
-                "caller_sms_enabled": row[7],
-                "emergency_detection_enabled": row[8],
-                "after_hours_enabled": row[9],
-                "calendar_enabled": row[10],
-                "crm_enabled": row[11],
-                "retell_agent_id": row[12],
-                "twilio_inbound_number": row[13],
-                "twilio_outbound_number": row[14],
-                "created_at": row[15].isoformat() if row[15] else None,
-                "updated_at": row[16].isoformat() if row[16] else None
-            })
+            settings.append(
+                {
+                    "client_key": row[0],
+                    "greeting_enabled": row[1],
+                    "custom_greeting": row[2],
+                    "end_call_enabled": row[3],
+                    "custom_end_call": row[4],
+                    "caller_confirmation_enabled": row[5],
+                    "business_sms_enabled": row[6],
+                    "caller_sms_enabled": row[7],
+                    "emergency_detection_enabled": row[8],
+                    "after_hours_enabled": row[9],
+                    "calendar_enabled": row[10],
+                    "crm_enabled": row[11],
+                    "retell_agent_id": row[12],
+                    "twilio_inbound_number": row[13],
+                    "twilio_outbound_number": row[14],
+                    "created_at": row[15].isoformat() if row[15] else None,
+                    "updated_at": row[16].isoformat() if row[16] else None,
+                }
+            )
 
         return {
             "status": "ok",
             "count": len(settings),
             "scope": "platform" if is_platform_admin(payload) else effective_client_key,
             "client_key_filter": effective_client_key,
-            "client_settings": settings
+            "client_settings": settings,
         }
 
     except HTTPException:
@@ -2649,18 +2773,15 @@ def get_client_settings(
 
     except Exception as e:
         logger.exception("Client settings read failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # CLIENT CONTACTS READ ENDPOINT
 # -------------------------------------------------
 @app.get("/client-contacts")
 def get_client_contacts(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
+    client_key: str = Query(None), authorization: str = Header(None)
 ):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
@@ -2672,34 +2793,42 @@ def get_client_contacts(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                where_sql, params = scoped_where_clause("client_contacts", effective_client_key)
-                cur.execute(f"""
+                where_sql, params = scoped_where_clause(
+                    "client_contacts", effective_client_key
+                )
+                cur.execute(
+                    f"""
                     SELECT client_key, first_name, last_name, email, phone, role, is_primary, created_at, updated_at
                     FROM client_contacts
                     {where_sql}
                     ORDER BY created_at DESC;
-                """, params)
+                """,
+                    params,
+                )
 
                 rows = cur.fetchall()
 
-        contacts = [{
-            "client_key": row[0],
-            "first_name": row[1],
-            "last_name": row[2],
-            "email": row[3],
-            "phone": row[4],
-            "role": row[5],
-            "is_primary": row[6],
-            "created_at": row[7].isoformat() if row[7] else None,
-            "updated_at": row[8].isoformat() if row[8] else None
-        } for row in rows]
+        contacts = [
+            {
+                "client_key": row[0],
+                "first_name": row[1],
+                "last_name": row[2],
+                "email": row[3],
+                "phone": row[4],
+                "role": row[5],
+                "is_primary": row[6],
+                "created_at": row[7].isoformat() if row[7] else None,
+                "updated_at": row[8].isoformat() if row[8] else None,
+            }
+            for row in rows
+        ]
 
         return {
             "status": "ok",
             "count": len(contacts),
             "scope": "platform" if is_platform_admin(payload) else effective_client_key,
             "client_key_filter": effective_client_key,
-            "contacts": contacts
+            "contacts": contacts,
         }
 
     except HTTPException:
@@ -2709,13 +2838,13 @@ def get_client_contacts(
         logger.exception("Client contacts read failed")
         return {"status": "error", "message": str(e)}
 
+
 # -------------------------------------------------
 # CLIENT ADDRESSES READ ENDPOINT
 # -------------------------------------------------
 @app.get("/client-addresses")
 def get_client_addresses(
-    client_key: str = Query(None),
-    authorization: str = Header(None)
+    client_key: str = Query(None), authorization: str = Header(None)
 ):
     payload = require_auth_token(authorization)
     effective_client_key = resolve_effective_client_key(payload, client_key)
@@ -2727,8 +2856,11 @@ def get_client_addresses(
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                where_sql, params = scoped_where_clause("client_addresses", effective_client_key)
-                cur.execute(f"""
+                where_sql, params = scoped_where_clause(
+                    "client_addresses", effective_client_key
+                )
+                cur.execute(
+                    f"""
                     SELECT
                         client_key,
                         address_line_1,
@@ -2743,32 +2875,36 @@ def get_client_addresses(
                     FROM client_addresses
                     {where_sql}
                     ORDER BY created_at DESC;
-                """, params)
+                """,
+                    params,
+                )
 
                 rows = cur.fetchall()
 
         addresses = []
 
         for row in rows:
-            addresses.append({
-                "client_key": row[0],
-                "address_line_1": row[1],
-                "address_line_2": row[2],
-                "city": row[3],
-                "state_province": row[4],
-                "postal_code": row[5],
-                "country": row[6],
-                "is_primary": row[7],
-                "created_at": row[8].isoformat() if row[8] else None,
-                "updated_at": row[9].isoformat() if row[9] else None
-            })
+            addresses.append(
+                {
+                    "client_key": row[0],
+                    "address_line_1": row[1],
+                    "address_line_2": row[2],
+                    "city": row[3],
+                    "state_province": row[4],
+                    "postal_code": row[5],
+                    "country": row[6],
+                    "is_primary": row[7],
+                    "created_at": row[8].isoformat() if row[8] else None,
+                    "updated_at": row[9].isoformat() if row[9] else None,
+                }
+            )
 
         return {
             "status": "ok",
             "count": len(addresses),
             "scope": "platform" if is_platform_admin(payload) else effective_client_key,
             "client_key_filter": effective_client_key,
-            "addresses": addresses
+            "addresses": addresses,
         }
 
     except HTTPException:
@@ -2777,6 +2913,7 @@ def get_client_addresses(
     except Exception as e:
         logger.exception("Client addresses read failed")
         return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # CLIENT SETTINGS UPDATE ENDPOINT
@@ -2788,10 +2925,7 @@ async def update_sms_number(request: Request, authorization: str = Header(None))
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     data = await request.json()
 
@@ -2802,34 +2936,36 @@ async def update_sms_number(request: Request, authorization: str = Header(None))
     if not client_key or not twilio_outbound_number:
         return {
             "status": "error",
-            "message": "client_key and valid twilio_outbound_number are required"
+            "message": "client_key and valid twilio_outbound_number are required",
         }
 
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE client_settings
                     SET
                         twilio_outbound_number = %s,
                         updated_at = NOW()
                     WHERE client_key = %s;
-                """, (
-                    twilio_outbound_number,
-                    client_key
-                ))
+                """,
+                    (twilio_outbound_number, client_key),
+                )
 
                 updated = cur.rowcount
 
             conn.commit()
 
         if updated == 0:
-            raise HTTPException(status_code=404, detail="client_settings record not found")
+            raise HTTPException(
+                status_code=404, detail="client_settings record not found"
+            )
 
         return {
             "status": "ok",
             "client_key": client_key,
-            "twilio_outbound_number": twilio_outbound_number
+            "twilio_outbound_number": twilio_outbound_number,
         }
 
     except HTTPException:
@@ -2837,10 +2973,8 @@ async def update_sms_number(request: Request, authorization: str = Header(None))
 
     except Exception as e:
         logger.exception("SMS number update failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # CLIENT SMS SETTINGS UPDATE ENDPOINT
@@ -2852,10 +2986,7 @@ async def update_sms_settings(request: Request, authorization: str = Header(None
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        return {
-            "status": "error",
-            "message": "DATABASE_URL not configured"
-        }
+        return {"status": "error", "message": "DATABASE_URL not configured"}
 
     data = await request.json()
 
@@ -2865,32 +2996,30 @@ async def update_sms_settings(request: Request, authorization: str = Header(None
     caller_sms_enabled = data.get("caller_sms_enabled")
 
     if not client_key:
-        return {
-            "status": "error",
-            "message": "client_key is required"
-        }
+        return {"status": "error", "message": "client_key is required"}
 
-    if not isinstance(business_sms_enabled, bool) or not isinstance(caller_sms_enabled, bool):
+    if not isinstance(business_sms_enabled, bool) or not isinstance(
+        caller_sms_enabled, bool
+    ):
         return {
             "status": "error",
-            "message": "business_sms_enabled and caller_sms_enabled must be true or false"
+            "message": "business_sms_enabled and caller_sms_enabled must be true or false",
         }
 
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     UPDATE client_settings
                     SET
                         business_sms_enabled = %s,
                         caller_sms_enabled = %s,
                         updated_at = NOW()
                     WHERE client_key = %s;
-                """, (
-                    business_sms_enabled,
-                    caller_sms_enabled,
-                    client_key
-                ))
+                """,
+                    (business_sms_enabled, caller_sms_enabled, client_key),
+                )
 
                 updated = cur.rowcount
 
@@ -2900,14 +3029,14 @@ async def update_sms_settings(request: Request, authorization: str = Header(None
             return {
                 "status": "error",
                 "message": "client_settings record not found",
-                "client_key": client_key
+                "client_key": client_key,
             }
 
         return {
             "status": "ok",
             "client_key": client_key,
             "business_sms_enabled": business_sms_enabled,
-            "caller_sms_enabled": caller_sms_enabled
+            "caller_sms_enabled": caller_sms_enabled,
         }
 
     except HTTPException:
@@ -2915,10 +3044,8 @@ async def update_sms_settings(request: Request, authorization: str = Header(None
 
     except Exception as e:
         logger.exception("SMS settings update failed")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # HELPERS
@@ -2945,9 +3072,7 @@ def extract_name(text: str):
         return None
 
     match = re.search(
-        r"(my name is|this is|i am|i'm)\s+([a-zA-Z]+\s+[a-zA-Z]+)",
-        text,
-        re.IGNORECASE
+        r"(my name is|this is|i am|i'm)\s+([a-zA-Z]+\s+[a-zA-Z]+)", text, re.IGNORECASE
     )
 
     if match:
@@ -2977,7 +3102,7 @@ def clean_call_outcome(value):
         "failed_phone",
         "off_topic",
         "unable_to_complete",
-        "unknown"
+        "unknown",
     }
 
     if value in allowed:
@@ -3027,7 +3152,10 @@ def classify_hvac_issue(text: str):
         issue_type = "no_cooling"
     elif "leak" in text:
         issue_type = "leak"
-    elif any(k in text for k in ["service", "maintenance", "checkup", "check up", "tune up", "routine"]):
+    elif any(
+        k in text
+        for k in ["service", "maintenance", "checkup", "check up", "tune up", "routine"]
+    ):
         issue_type = "maintenance"
 
     urgent_keywords = [
@@ -3054,7 +3182,7 @@ def classify_hvac_issue(text: str):
         "flood",
         "emergency",
         "freezing",
-        "urgent"
+        "urgent",
     ]
 
     routine_keywords = [
@@ -3066,7 +3194,7 @@ def classify_hvac_issue(text: str):
         "maintenance",
         "tune up",
         "service on my hvac",
-        "schedule service"
+        "schedule service",
     ]
 
     if any(k in text for k in routine_keywords):
@@ -3125,7 +3253,8 @@ def get_client_by_key(client_key: str):
         try:
             with psycopg.connect(database_url) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT
                             client_key,
                             business_name,
@@ -3139,7 +3268,9 @@ def get_client_by_key(client_key: str):
                         FROM clients
                         WHERE client_key = %s
                         LIMIT 1;
-                    """, (client_key,))
+                    """,
+                        (client_key,),
+                    )
 
                     row = cur.fetchone()
 
@@ -3154,7 +3285,7 @@ def get_client_by_key(client_key: str):
                     "plan_tier": row[6],
                     "timezone": row[7],
                     "inbound_phone": row[8],
-                    "source": "database"
+                    "source": "database",
                 }
 
                 if client["status"] != "active":
@@ -3177,7 +3308,7 @@ def get_client_by_key(client_key: str):
             **fallback_client,
             "client_key": client_key,
             "status": "active",
-            "source": "fallback"
+            "source": "fallback",
         }
 
     return None
@@ -3204,7 +3335,8 @@ def get_client_by_inbound_phone(inbound_phone: str):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         client_key,
                         business_name,
@@ -3218,7 +3350,9 @@ def get_client_by_inbound_phone(inbound_phone: str):
                     FROM clients
                     WHERE inbound_phone = %s
                     LIMIT 1;
-                """, (formatted_phone,))
+                """,
+                    (formatted_phone,),
+                )
 
                 row = cur.fetchone()
 
@@ -3236,20 +3370,25 @@ def get_client_by_inbound_phone(inbound_phone: str):
             "plan_tier": row[6],
             "timezone": row[7],
             "inbound_phone": row[8],
-            "source": "database_inbound_phone"
+            "source": "database_inbound_phone",
         }
 
         if client["status"] != "active":
             log_info("[INBOUND CLIENT INACTIVE]", inbound_phone=formatted_phone)
             return None
 
-        log_info("[INBOUND ROUTED]", inbound_phone=formatted_phone, client_key=client["client_key"])
+        log_info(
+            "[INBOUND ROUTED]",
+            inbound_phone=formatted_phone,
+            client_key=client["client_key"],
+        )
 
         return client
 
     except Exception as e:
         logger.exception("Inbound routing failed")
         return None
+
 
 # -------------------------------------------------
 # CLIENT SETTINGS LOOKUP
@@ -3270,7 +3409,8 @@ def get_client_settings_by_key(client_key: str):
     try:
         with psycopg.connect(database_url) as conn:
             with conn.cursor() as cur:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT
                         client_key,
                         greeting_enabled,
@@ -3290,7 +3430,9 @@ def get_client_settings_by_key(client_key: str):
                     FROM client_settings
                     WHERE client_key = %s
                     LIMIT 1;
-                """, (client_key,))
+                """,
+                    (client_key,),
+                )
 
                 row = cur.fetchone()
 
@@ -3313,7 +3455,7 @@ def get_client_settings_by_key(client_key: str):
             "crm_enabled": row[11],
             "retell_agent_id": row[12],
             "twilio_inbound_number": row[13],
-            "twilio_outbound_number": row[14]
+            "twilio_outbound_number": row[14],
         }
 
         return settings
@@ -3321,6 +3463,7 @@ def get_client_settings_by_key(client_key: str):
     except Exception as e:
         logger.exception("Client settings lookup failed")
         return None
+
 
 # -------------------------------------------------
 # DATABASE CALL PERSISTENCE
@@ -3340,7 +3483,7 @@ def save_call_record(
     business_error,
     caller_notified,
     caller_error,
-    raw_payload
+    raw_payload,
 ):
     """
     Persists analyzed call results to PostgreSQL.
@@ -3353,14 +3496,11 @@ def save_call_record(
 
     if not database_url:
         logger.warning("Call save skipped: DATABASE_URL not configured")
-        return {
-            "saved": False,
-            "error": "DATABASE_URL not configured"
-        }
+        return {"saved": False, "error": "DATABASE_URL not configured"}
 
     try:
         with psycopg.connect(database_url) as conn:
-            with conn.cursor() as cur:             
+            with conn.cursor() as cur:
                 # -------------------------------------------------
                 # BILLABLE USAGE
                 # -------------------------------------------------
@@ -3372,7 +3512,8 @@ def save_call_record(
 
                 billable_minutes = round(call_duration_seconds / 60, 2)
 
-                cur.execute("""
+                cur.execute(
+                    """
                     INSERT INTO calls (
                         call_id,
                         client_key,
@@ -3411,43 +3552,39 @@ def save_call_record(
                         raw_payload = EXCLUDED.raw_payload,
                         call_duration_seconds = EXCLUDED.call_duration_seconds,
                         billable_minutes = EXCLUDED.billable_minutes;
-                """, (
-                    call_id,
-                    client_key,
-                    caller_name,
-                    caller_phone,
-                    service_address,
-                    issue_description,
-                    issue_type,
-                    urgency,
-                    call_outcome,
-                    sms_policy_reason,
-                    business_notified,
-                    business_error,
-                    caller_notified,
-                    caller_error,
-                    Jsonb(raw_payload),
-                    call_duration_seconds,
-                    billable_minutes
-                ))
+                """,
+                    (
+                        call_id,
+                        client_key,
+                        caller_name,
+                        caller_phone,
+                        service_address,
+                        issue_description,
+                        issue_type,
+                        urgency,
+                        call_outcome,
+                        sms_policy_reason,
+                        business_notified,
+                        business_error,
+                        caller_notified,
+                        caller_error,
+                        Jsonb(raw_payload),
+                        call_duration_seconds,
+                        billable_minutes,
+                    ),
+                )
 
             conn.commit()
 
         logger.info("[CALL SAVED] call_id=%s", call_id)
 
-        return {
-            "saved": True,
-            "error": None
-        }
+        return {"saved": True, "error": None}
 
     except Exception as e:
         error = str(e)
         logger.exception("Call save failed")
 
-        return {
-            "saved": False,
-            "error": error
-        }
+        return {"saved": False, "error": error}
 
 
 # -------------------------------------------------
@@ -3455,23 +3592,15 @@ def save_call_record(
 # -------------------------------------------------
 def get_sms_policy(call_outcome, required_fields_present):
     if call_outcome == "confirmed" and required_fields_present:
-        return {
-            "business": True,
-            "caller": True,
-            "reason": "confirmed_request"
-        }
+        return {"business": True, "caller": True, "reason": "confirmed_request"}
 
     if call_outcome == "address_fallback":
-        return {
-            "business": True,
-            "caller": True,
-            "reason": "address_fallback"
-        }
+        return {"business": True, "caller": True, "reason": "address_fallback"}
 
     return {
         "business": False,
         "caller": False,
-        "reason": f"sms_suppressed_for_{call_outcome}"
+        "reason": f"sms_suppressed_for_{call_outcome}",
     }
 
 
@@ -3482,33 +3611,23 @@ def get_sms_policy(call_outcome, required_fields_present):
 async def inbound_webhook(
     request: Request,
     x_webhook_secret: str = Header(None),
-    x_retell_signature: str = Header(None)
+    x_retell_signature: str = Header(None),
 ):
     require_webhook_secret(x_webhook_secret)
 
     try:
         raw_body = (await request.body()).decode("utf-8")
         verify_retell_signature(
-            raw_body,
-            x_retell_signature,
-            enforce_env="RETELL_VERIFY_INBOUND_SIGNATURE"
+            raw_body, x_retell_signature, enforce_env="RETELL_VERIFY_INBOUND_SIGNATURE"
         )
         logger.info("[RETELL INBOUND SIGNATURE] Verified")
         data = json.loads(raw_body or "{}")
 
         call_inbound = data.get("call_inbound") or {}
 
-        from_number = (
-            call_inbound.get("from_number")
-            or data.get("from_number")
-            or ""
-        )
+        from_number = call_inbound.get("from_number") or data.get("from_number") or ""
 
-        to_number = (
-            call_inbound.get("to_number")
-            or data.get("to_number")
-            or ""
-        )
+        to_number = call_inbound.get("to_number") or data.get("to_number") or ""
 
         formatted_from_phone = normalize_phone(from_number)
         formatted_to_phone = normalize_phone(to_number)
@@ -3527,21 +3646,21 @@ async def inbound_webhook(
             from_number=formatted_from_phone or from_number,
             to_number=formatted_to_phone or to_number,
             client_id=client_id,
-            routing_source=routing_source
+            routing_source=routing_source,
         )
 
         return {
             "call_inbound": {
                 "dynamic_variables": {
                     "caller_phone": formatted_from_phone or from_number,
-                    "client_id": client_id
+                    "client_id": client_id,
                 },
                 "metadata": {
                     "caller_phone": formatted_from_phone or from_number,
                     "client_id": client_id,
                     "to_number": formatted_to_phone or to_number,
-                    "routing_source": routing_source
-                }
+                    "routing_source": routing_source,
+                },
             }
         }
 
@@ -3553,13 +3672,11 @@ async def inbound_webhook(
 
         return {
             "call_inbound": {
-                "dynamic_variables": {
-                    "client_id": "hvac_toronto_001"
-                },
+                "dynamic_variables": {"client_id": "hvac_toronto_001"},
                 "metadata": {
                     "client_id": "hvac_toronto_001",
-                    "routing_source": "error_fallback"
-                }
+                    "routing_source": "error_fallback",
+                },
             }
         }
 
@@ -3571,7 +3688,7 @@ async def inbound_webhook(
 async def triage(
     request: Request,
     x_webhook_secret: str = Header(None),
-    x_retell_signature: str = Header(None)
+    x_retell_signature: str = Header(None),
 ):
     # Legacy optional shared-secret support remains available, but the preferred
     # production path is Retell signature verification using X-Retell-Signature.
@@ -3590,7 +3707,7 @@ async def triage(
             "route": "standard",
             "summary": "Unable to parse triage payload.",
             "issue_type": "other",
-            "confidence": 0.5
+            "confidence": 0.5,
         }
 
     # Retell Custom Functions may send either a flat args-only payload or
@@ -3614,7 +3731,7 @@ async def triage(
         "route": urgency,
         "summary": f"Caller reports HVAC issue: {transcript_raw}",
         "issue_type": issue_type,
-        "confidence": 0.9 if urgency == "urgent" else 0.75
+        "confidence": 0.9 if urgency == "urgent" else 0.75,
     }
 
     log_info(
@@ -3623,7 +3740,7 @@ async def triage(
         route=response["route"],
         issue_type=response["issue_type"],
         confidence=response["confidence"],
-        transcript=transcript_raw
+        transcript=transcript_raw,
     )
 
     return response
@@ -3636,7 +3753,7 @@ async def triage(
 async def call_summary(
     request: Request,
     x_webhook_secret: str = Header(None),
-    x_retell_signature: str = Header(None)
+    x_retell_signature: str = Header(None),
 ):
     require_webhook_secret(x_webhook_secret)
 
@@ -3645,7 +3762,7 @@ async def call_summary(
         verify_retell_signature(
             raw_body,
             x_retell_signature,
-            enforce_env="RETELL_VERIFY_CALL_SUMMARY_SIGNATURE"
+            enforce_env="RETELL_VERIFY_CALL_SUMMARY_SIGNATURE",
         )
         logger.info("[RETELL CALL SUMMARY SIGNATURE] Verified")
         data = json.loads(raw_body or "{}")
@@ -3655,11 +3772,7 @@ async def call_summary(
         event_type = data.get("event") or data.get("type")
         call = data.get("call") or {}
 
-        call_id = (
-            data.get("call_id")
-            or data.get("id")
-            or call.get("call_id")
-        )
+        call_id = data.get("call_id") or data.get("id") or call.get("call_id")
 
         if not call_id:
             return {"status": "error", "message": "missing call_id"}
@@ -3683,20 +3796,22 @@ async def call_summary(
                 call_id=call_id,
                 caller_phone=formatted_phone or caller_phone_raw,
                 metadata_present=bool(metadata),
-                call_key_count=len(call.keys()) if isinstance(call, dict) else 0
+                call_key_count=len(call.keys()) if isinstance(call, dict) else 0,
             )
 
             if formatted_phone:
                 CALL_PHONE_MAP[call_id] = formatted_phone
                 CALL_PHONE_META[call_id] = time.time()
-                log_info("[PHONE STORED]", call_id=call_id, caller_phone=formatted_phone)
+                log_info(
+                    "[PHONE STORED]", call_id=call_id, caller_phone=formatted_phone
+                )
             else:
                 logger.warning("[PHONE NOT FOUND ON CALL_STARTED] call_id=%s", call_id)
 
             return {
                 "status": "phone_capture_processed",
                 "call_id": call_id,
-                "caller_phone": formatted_phone
+                "caller_phone": formatted_phone,
             }
 
         if event_type != "call_analyzed":
@@ -3726,19 +3841,12 @@ async def call_summary(
             or {}
         )
 
-        messages = (
-            call.get("transcript_object")
-            or data.get("transcript_object")
-            or []
-        )
+        messages = call.get("transcript_object") or data.get("transcript_object") or []
 
         user_text = build_transcript_text(messages)
 
         full_transcript = (
-            call.get("transcript")
-            or data.get("transcript")
-            or user_text
-            or ""
+            call.get("transcript") or data.get("transcript") or user_text or ""
         )
 
         client_id = (
@@ -3758,26 +3866,20 @@ async def call_summary(
             client_settings = {
                 "business_sms_enabled": True,
                 "caller_sms_enabled": True,
-                "twilio_outbound_number": TWILIO_PHONE
+                "twilio_outbound_number": TWILIO_PHONE,
             }
 
         if not client:
             return {
                 "status": "error",
                 "message": "invalid or inactive client_id",
-                "client_id": client_id
+                "client_id": client_id,
             }
 
-        caller_name = (
-            custom.get("full_name")
-            or custom.get("caller_name")
-            or "Unknown"
-        )
+        caller_name = custom.get("full_name") or custom.get("caller_name") or "Unknown"
 
         service_address = (
-            custom.get("service_address")
-            or custom.get("address")
-            or "Unknown"
+            custom.get("service_address") or custom.get("address") or "Unknown"
         )
 
         issue_description = (
@@ -3808,37 +3910,37 @@ async def call_summary(
         formatted_phone = normalize_phone(caller_phone_raw)
 
         if not formatted_phone:
-            formatted_phone = normalize_phone(user_text) or normalize_phone(full_transcript)
+            formatted_phone = normalize_phone(user_text) or normalize_phone(
+                full_transcript
+            )
 
         classified_urgency, issue_type = classify_hvac_issue(issue_description)
 
         if not custom.get("urgency"):
             urgency = classified_urgency
 
-        issue_type = (
-            custom.get("issue_type")
-            or issue_type
-        )
+        issue_type = custom.get("issue_type") or issue_type
 
         short_summary = build_short_summary(urgency, issue_type)
 
-        required_fields_present = all([
-            caller_name and caller_name != "Unknown",
-            formatted_phone,
-            service_address and service_address != "Unknown",
-            issue_description and issue_description != "No issue description available."
-        ])
+        required_fields_present = all(
+            [
+                caller_name and caller_name != "Unknown",
+                formatted_phone,
+                service_address and service_address != "Unknown",
+                issue_description
+                and issue_description != "No issue description available.",
+            ]
+        )
 
         sms_policy = get_sms_policy(call_outcome, required_fields_present)
 
-        send_business_sms = (
-            sms_policy["business"]
-            and client_settings.get("business_sms_enabled", True)
+        send_business_sms = sms_policy["business"] and client_settings.get(
+            "business_sms_enabled", True
         )
 
-        send_caller_sms = (
-            sms_policy["caller"]
-            and client_settings.get("caller_sms_enabled", True)
+        send_caller_sms = sms_policy["caller"] and client_settings.get(
+            "caller_sms_enabled", True
         )
 
         sms_policy_reason = sms_policy["reason"]
@@ -3856,7 +3958,7 @@ async def call_summary(
             issue_type=issue_type,
             call_outcome=call_outcome,
             required_fields_present=required_fields_present,
-            sms_policy_reason=sms_policy_reason
+            sms_policy_reason=sms_policy_reason,
         )
 
         if call_outcome == "address_fallback":
@@ -3888,17 +3990,14 @@ async def call_summary(
         business_sent = False
         business_error = None
 
-        sms_from_number = (
-            client_settings.get("twilio_outbound_number")
-            or TWILIO_PHONE
-        )
+        sms_from_number = client_settings.get("twilio_outbound_number") or TWILIO_PHONE
 
         if send_business_sms and twilio_client and sms_from_number:
             try:
                 twilio_client.messages.create(
                     body=business_message,
                     from_=sms_from_number,
-                    to=client["business_phone"]
+                    to=client["business_phone"],
                 )
                 business_sent = True
                 logger.info("[TWILIO BUSINESS] Sent")
@@ -3910,14 +4009,17 @@ async def call_summary(
                 business_error = f"Business SMS suppressed: {sms_policy_reason}"
             elif not twilio_client or not sms_from_number:
                 business_error = "Twilio client or SMS sender number missing"
-                
 
             logger.info("[TWILIO BUSINESS SKIPPED] %s", business_error)
 
         caller_sent = False
         caller_error = None
 
-        if send_caller_sms and formatted_phone and client_settings.get("caller_sms_enabled", True):
+        if (
+            send_caller_sms
+            and formatted_phone
+            and client_settings.get("caller_sms_enabled", True)
+        ):
             display_name = caller_name if caller_name != "Unknown" else "there"
 
             if call_outcome == "address_fallback":
@@ -3938,9 +4040,7 @@ async def call_summary(
             if twilio_client and sms_from_number:
                 try:
                     twilio_client.messages.create(
-                        body=caller_message,
-                        from_=sms_from_number,
-                        to=formatted_phone
+                        body=caller_message, from_=sms_from_number, to=formatted_phone
                     )
                     caller_sent = True
                     logger.info("[TWILIO CALLER] Sent")
@@ -3986,7 +4086,7 @@ async def call_summary(
             business_error=business_error,
             caller_notified=caller_sent,
             caller_error=caller_error,
-            raw_payload=data
+            raw_payload=data,
         )
 
         CALL_PHONE_MAP.pop(call_id, None)
@@ -4011,7 +4111,7 @@ async def call_summary(
             "caller_notified": caller_sent,
             "caller_error": caller_error,
             "call_saved": call_save_result["saved"],
-            "call_save_error": call_save_result["error"]
+            "call_save_error": call_save_result["error"],
         }
 
     except Exception as e:
