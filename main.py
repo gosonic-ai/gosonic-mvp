@@ -4,25 +4,53 @@ from twilio.rest import Client
 from psycopg.types.json import Jsonb
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+
 import psycopg
-import jwt
 import os
 import time
 import re
 import logging
 import json
-import hashlib
-import hmac
-import secrets
+
+from app.config import (
+    APP_NAME,
+    APP_VERSION,
+    LOG_LEVEL,
+    LOG_SENSITIVE_DATA,
+    CORS_ALLOWED_ORIGINS,
+    SUPPORTED_TIMEZONES,
+    DEFAULT_CLIENT_TIMEZONE,
+    TWILIO_SID,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_PHONE,
+    DATABASE_URL,
+    RETELL_API_KEY,
+    WEBHOOK_SHARED_SECRET,
+    ALLOW_DB_INIT,
+)
+
+from app.database import get_connection
+
+from app.auth import (
+    require_admin,
+    hash_password,
+    verify_password,
+    create_session_token,
+    require_auth_token,
+    fallback_env_admin_user,
+)
 
 
-app = FastAPI(title="Gosonic MVP API", version="0.2.6")
+app = FastAPI(
+    title=APP_NAME,
+    version=APP_VERSION
+)
 
 # -------------------------------------------------
 # LOGGING
 # -------------------------------------------------
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s %(message)s"
 )
 logger = logging.getLogger("gosonic")
@@ -32,26 +60,10 @@ logging.getLogger("twilio").setLevel(logging.WARNING)
 logging.getLogger("twilio.http_client").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-LOG_SENSITIVE_DATA = os.getenv("LOG_SENSITIVE_DATA", "false").lower() == "true"
-
 # -------------------------------------------------
 # PLATFORM TIMEZONES
 # -------------------------------------------------
 # Store IANA timezone names in the database. Display friendly labels in the dashboard.
-SUPPORTED_TIMEZONES = {
-    "America/New_York": "Eastern Time",
-    "America/Chicago": "Central Time",
-    "America/Denver": "Mountain Time",
-    "America/Phoenix": "Mountain Time — Arizona",
-    "America/Los_Angeles": "Pacific Time",
-    "America/Anchorage": "Alaska Time",
-    "Pacific/Honolulu": "Hawaii Time",
-    "America/Toronto": "Eastern Time — Toronto",
-    "America/Vancouver": "Pacific Time — Vancouver",
-}
-
-DEFAULT_CLIENT_TIMEZONE = os.getenv("DEFAULT_CLIENT_TIMEZONE", "America/New_York")
-
 
 def normalize_timezone(value: str):
     if value in SUPPORTED_TIMEZONES:
@@ -68,11 +80,7 @@ def timezone_label(value: str):
 # -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        origin.strip()
-        for origin in os.getenv("CORS_ALLOWED_ORIGINS", "https://client.gosonic.com").split(",")
-        if origin.strip()
-    ],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -81,23 +89,6 @@ app.add_middleware(
 # -------------------------------------------------
 # ADMIN AUTH
 # -------------------------------------------------
-def require_admin(x_admin_key: str):
-    admin_key = os.getenv("ADMIN_API_KEY")
-
-    if not admin_key:
-        raise HTTPException(
-            status_code=500,
-            detail="ADMIN_API_KEY not configured"
-        )
-
-    if x_admin_key != admin_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-    return True
-
 
 def require_webhook_secret(x_webhook_secret: str):
     """
@@ -107,7 +98,7 @@ def require_webhook_secret(x_webhook_secret: str):
     as the X-Webhook-Secret header. If WEBHOOK_SHARED_SECRET is not set,
     this check is skipped to avoid breaking the current MVP flow.
     """
-    expected_secret = os.getenv("WEBHOOK_SHARED_SECRET")
+    expected_secret = WEBHOOK_SHARED_SECRET
 
     if not expected_secret:
         return True
@@ -134,7 +125,7 @@ def verify_retell_signature(raw_body: str, signature: str, enforce_env: str = "R
     if not should_enforce:
         return True
 
-    api_key = os.getenv("RETELL_API_KEY")
+    api_key = RETELL_API_KEY
 
     if not api_key:
         logger.error("[RETELL SIGNATURE] RETELL_API_KEY not configured")
@@ -178,7 +169,7 @@ def observe_retell_signature(raw_body: str, signature: str, label: str = "[RETEL
     This never blocks request processing. It only logs whether Retell is
     sending X-Retell-Signature and whether verification succeeds.
     """
-    api_key = os.getenv("RETELL_API_KEY")
+    api_key = RETELL_API_KEY
 
     if not signature:
         logger.info("%s Missing X-Retell-Signature", label)
@@ -269,10 +260,6 @@ def log_info(label: str, **fields):
 # -------------------------------------------------
 # ENV / TWILIO SETUP
 # -------------------------------------------------
-TWILIO_SID = os.getenv("TWILIO_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE = os.getenv("TWILIO_PHONE")
-
 twilio_client = None
 
 if TWILIO_SID and TWILIO_AUTH_TOKEN:
@@ -307,81 +294,9 @@ CALL_PHONE_META = {}
 # -------------------------------------------------
 # PASSWORD + SESSION HELPERS
 # -------------------------------------------------
-def hash_password(password: str):
-    """
-    PBKDF2 password hashing using the Python standard library.
-    Format: pbkdf2_sha256$iterations$salt$hash
-    """
-    if not password:
-        return None
-
-    iterations = 260000
-    salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        iterations
-    ).hex()
-
-    return f"pbkdf2_sha256${iterations}${salt}${digest}"
-
-
-def verify_password(password: str, password_hash: str):
-    if not password or not password_hash:
-        return False
-
-    try:
-        algorithm, iterations, salt, expected_digest = password_hash.split("$", 3)
-
-        if algorithm != "pbkdf2_sha256":
-            return False
-
-        candidate_digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt.encode("utf-8"),
-            int(iterations)
-        ).hex()
-
-        return hmac.compare_digest(candidate_digest, expected_digest)
-
-    except Exception:
-        return False
-
-
-def create_session_token(user_profile: dict):
-    session_secret = os.getenv("SESSION_SECRET")
-
-    if not session_secret:
-        raise HTTPException(
-            status_code=500,
-            detail="SESSION_SECRET not configured"
-        )
-
-    payload = {
-        "email": user_profile.get("email"),
-        "user_id": user_profile.get("user_id"),
-        "client_key": user_profile.get("client_key"),
-        "role": user_profile.get("role"),
-        "full_name": user_profile.get("full_name"),
-        "business_name": user_profile.get("business_name"),
-        "timezone": user_profile.get("timezone"),
-        "iat": datetime.now(timezone.utc),
-        "exp": datetime.now(timezone.utc) + timedelta(hours=12)
-    }
-
-    token = jwt.encode(
-        payload,
-        session_secret,
-        algorithm="HS256"
-    )
-
-    return token
-
 
 def get_user_by_email(email: str):
-    database_url = os.getenv("DATABASE_URL")
+    database_url = DATABASE_URL
 
     if not database_url or not email:
         return None
@@ -460,68 +375,6 @@ def update_user_last_login(user_id: int):
     except Exception:
         logger.exception("[AUTH LAST LOGIN UPDATE FAILED]")
         return None
-
-
-def fallback_env_admin_user(email: str):
-    admin_email = os.getenv("ADMIN_EMAIL")
-
-    if not admin_email or email != admin_email:
-        return None
-
-    return {
-        "user_id": None,
-        "client_key": None,
-        "full_name": os.getenv("ADMIN_FULL_NAME", "Gosonic Admin"),
-        "email": admin_email,
-        "role": "platform_admin",
-        "status": "active",
-        "last_login_at": None,
-        "business_name": os.getenv("ADMIN_COMPANY_NAME", "Gosonic"),
-        "timezone": DEFAULT_CLIENT_TIMEZONE,
-        "timezone_label": timezone_label(DEFAULT_CLIENT_TIMEZONE),
-        "auth_source": "environment"
-    }
-
-# -------------------------------------------------
-# REQUIRE AUTH TOKEN
-# -------------------------------------------------
-def require_auth_token(authorization: str):
-    session_secret = os.getenv("SESSION_SECRET")
-
-    if not session_secret:
-        raise HTTPException(
-            status_code=500,
-            detail="SESSION_SECRET not configured"
-        )
-
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail="Missing or invalid authorization header"
-        )
-
-    token = authorization.replace("Bearer ", "").strip()
-
-    try:
-        payload = jwt.decode(
-            token,
-            session_secret,
-            algorithms=["HS256"]
-        )
-
-        return payload
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=401,
-            detail="Session expired"
-        )
-
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid session token"
-        )
 
 
 # -------------------------------------------------
