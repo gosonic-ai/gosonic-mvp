@@ -1919,7 +1919,8 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                         escalation_reason,
                         transcript,
                         ended_at,
-                        created_at
+                        created_at,
+                        raw_payload
                     FROM calls
                     {where_sql}
                     ORDER BY created_at DESC
@@ -1961,6 +1962,7 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "transcript": row[23],
                     "ended_at": row[24].isoformat() if row[24] else None,
                     "created_at": row[25].isoformat() if row[25] else None,
+                    "raw_payload": row[26],
                 }
             )
 
