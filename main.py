@@ -3515,11 +3515,17 @@ def save_call_record(
                 # -------------------------------------------------
                 # BILLABLE USAGE
                 # -------------------------------------------------
-                call_duration_seconds = (
-                    raw_payload.get("duration_ms", 0) / 1000
-                    if raw_payload.get("duration_ms")
-                    else 0
+                call_payload = raw_payload.get("call") or {}
+
+                duration_ms = (
+                    call_payload.get("duration_ms")
+                    or raw_payload.get("duration_ms")
+                    or 0
                 )
+
+                call_duration_seconds = round(duration_ms / 1000) if duration_ms else 0
+
+                billable_minutes = round(call_duration_seconds / 60, 2)
 
                 billable_minutes = round(call_duration_seconds / 60, 2)
 
