@@ -3784,6 +3784,40 @@ async def triage(
     return response
 
 
+def extract_tool_confidence(call: dict):
+    """
+    Extract confidence score from Retell tool call results.
+    """
+
+    if not isinstance(call, dict):
+        return None
+
+    events = call.get("transcript_with_tool_calls") or []
+
+    for event in events:
+
+        if event.get("role") != "tool_call_result":
+            continue
+
+        content = event.get("content")
+
+        if not content:
+            continue
+
+        try:
+            parsed = json.loads(content)
+
+            confidence = parsed.get("confidence")
+
+            if confidence is not None:
+                return confidence
+
+        except Exception:
+            continue
+
+    return None
+
+
 # -------------------------------------------------
 # CALL SUMMARY WEBHOOK
 # -------------------------------------------------
@@ -4129,12 +4163,16 @@ async def call_summary(
             call_status="completed",
             webhook_status="received",
 
-            agent_id=data.get("agent_id"),
-            call_direction=data.get("direction"),
+            agent_id=call.get("agent_id"),
+            call_direction=call.get("direction"),
 
-            confidence=analysis.get("confidence"),
+            confidence=extract_tool_confidence(call),
 
-            processing_latency_ms=data.get("latency_ms"),
+            processing_latency_ms=(
+                call.get("latency", {})
+                .get("e2e", {})
+                .get("p50")
+            ),
 
             escalation_reason=(
                 "urgent_call"
