@@ -1323,6 +1323,40 @@ def init_db(x_admin_key: str = Header(None)):
                 """)
 
                 # -------------------------------------------------
+                # CALL EVENTS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS call_events (
+                        id SERIAL PRIMARY KEY,
+
+                        call_id TEXT NOT NULL,
+                        client_key TEXT NOT NULL REFERENCES clients(client_key),
+
+                        event_type TEXT NOT NULL,
+                        event_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+                        event_metadata JSONB,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_call_events_call_id
+                    ON call_events(call_id);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_call_events_client_key
+                    ON call_events(client_key);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_call_events_event_type
+                    ON call_events(event_type);
+                """)
+
+                # -------------------------------------------------
                 # CLIENT PLANS TABLE
                 # -------------------------------------------------
                 cur.execute("""
@@ -3527,8 +3561,6 @@ def save_call_record(
 
                 billable_minutes = round(call_duration_seconds / 60, 2)
 
-                billable_minutes = round(call_duration_seconds / 60, 2)
-
                 cur.execute(
                     """
                     INSERT INTO calls (
@@ -3630,6 +3662,71 @@ def save_call_record(
 
         return {"saved": False, "error": error}
 
+# -------------------------------------------------
+# CALL EVENT PERSISTENCE
+# -------------------------------------------------
+def log_call_event(
+    call_id,
+    client_key,
+    event_type,
+    event_metadata=None,
+    event_timestamp=None,
+):
+    """
+    Writes immutable operational call events.
+
+    This is the foundation for lifecycle timelines, SLA tracking,
+    workflow observability, billing intelligence, and enterprise audit trails.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        logger.warning("Call event skipped: DATABASE_URL not configured")
+        return {"saved": False, "error": "DATABASE_URL not configured"}
+
+    if not call_id or not client_key or not event_type:
+        return {
+            "saved": False,
+            "error": "call_id, client_key, and event_type are required",
+        }
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO call_events (
+                        call_id,
+                        client_key,
+                        event_type,
+                        event_timestamp,
+                        event_metadata
+                    )
+                    VALUES (%s, %s, %s, COALESCE(%s, NOW()), %s);
+                    """,
+                    (
+                        call_id,
+                        client_key,
+                        event_type,
+                        event_timestamp,
+                        Jsonb(event_metadata or {}),
+                    ),
+                )
+
+            conn.commit()
+
+        logger.info(
+            "[CALL EVENT SAVED] call_id=%s event_type=%s",
+            call_id,
+            event_type,
+        )
+
+        return {"saved": True, "error": None}
+
+    except Exception as e:
+        logger.exception("Call event save failed")
+        return {"saved": False, "error": str(e)}
 
 # -------------------------------------------------
 # SMS ELIGIBILITY ENGINE
@@ -4190,6 +4287,29 @@ async def call_summary(
 
             ended_at=datetime.now(timezone.utc),
         )
+
+        if call_save_result.get("saved"):
+            log_call_event(
+                call_id=call_id,
+                client_key=client_id,
+                event_type="call_analyzed",
+                event_metadata={
+                    "call_status": "completed",
+                    "webhook_status": "received",
+                    "urgency": urgency,
+                    "call_outcome": call_outcome,
+                    "issue_type": issue_type,
+                    "business_notified": business_sent,
+                    "caller_notified": caller_sent,
+                    "confidence": extract_tool_confidence(call),
+                    "processing_latency_ms": (
+                        call.get("latency", {})
+                        .get("e2e", {})
+                        .get("p50")
+                    ),
+                },
+                event_timestamp=datetime.now(timezone.utc),
+            )
 
         CALL_PHONE_MAP.pop(call_id, None)
         CALL_PHONE_META.pop(call_id, None)
