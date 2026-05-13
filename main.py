@@ -2017,6 +2017,98 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
 
 
 # -------------------------------------------------
+# CALL EVENTS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/calls/{call_id}/events")
+def get_call_events(
+    call_id: str,
+    client_key: str = Query(None),
+    authorization: str = Header(None),
+):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    if not call_id:
+        raise HTTPException(status_code=400, detail="call_id is required")
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                if effective_client_key:
+                    cur.execute(
+                        """
+                        SELECT
+                            id,
+                            call_id,
+                            client_key,
+                            event_type,
+                            event_timestamp,
+                            event_metadata,
+                            created_at
+                        FROM call_events
+                        WHERE call_id = %s
+                          AND client_key = %s
+                        ORDER BY event_timestamp ASC, id ASC;
+                        """,
+                        (call_id, effective_client_key),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            id,
+                            call_id,
+                            client_key,
+                            event_type,
+                            event_timestamp,
+                            event_metadata,
+                            created_at
+                        FROM call_events
+                        WHERE call_id = %s
+                        ORDER BY event_timestamp ASC, id ASC;
+                        """,
+                        (call_id,),
+                    )
+
+                rows = cur.fetchall()
+
+        events = []
+
+        for row in rows:
+            events.append(
+                {
+                    "event_id": row[0],
+                    "call_id": row[1],
+                    "client_key": row[2],
+                    "event_type": row[3],
+                    "event_timestamp": row[4].isoformat() if row[4] else None,
+                    "event_metadata": row[5] or {},
+                    "created_at": row[6].isoformat() if row[6] else None,
+                }
+            )
+
+        return {
+            "status": "ok",
+            "count": len(events),
+            "call_id": call_id,
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
+            "events": events,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Call events read failed")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
 # CLIENT ACCOUNT ENDPOINT
 # -------------------------------------------------
 @app.get("/client/account")
