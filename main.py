@@ -4403,6 +4403,45 @@ async def call_summary(
                 event_timestamp=datetime.now(timezone.utc),
             )
 
+            if business_sent:
+                log_call_event(
+                    call_id=call_id,
+                    client_key=client_id,
+                    event_type="business_sms_sent",
+                    event_metadata={
+                        "channel": "sms",
+                        "recipient_type": "business",
+                        "sms_policy_reason": sms_policy_reason,
+                    },
+                    event_timestamp=datetime.now(timezone.utc),
+                )
+
+            if caller_sent:
+                log_call_event(
+                    call_id=call_id,
+                    client_key=client_id,
+                    event_type="caller_sms_sent",
+                    event_metadata={
+                        "channel": "sms",
+                        "recipient_type": "caller",
+                        "sms_policy_reason": sms_policy_reason,
+                    },
+                    event_timestamp=datetime.now(timezone.utc),
+                )
+
+            log_call_event(
+                call_id=call_id,
+                client_key=client_id,
+                event_type="call_saved",
+                event_metadata={
+                    "storage": "postgresql",
+                    "call_status": "completed",
+                    "webhook_status": "received",
+                },
+                event_timestamp=datetime.now(timezone.utc),
+            )
+
+
         CALL_PHONE_MAP.pop(call_id, None)
         CALL_PHONE_META.pop(call_id, None)
 
