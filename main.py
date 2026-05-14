@@ -1357,6 +1357,94 @@ def init_db(x_admin_key: str = Header(None)):
                 """)
 
                 # -------------------------------------------------
+                # WORKFLOW INSTANCES TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS workflow_instances (
+                        id SERIAL PRIMARY KEY,
+
+                        workflow_id TEXT UNIQUE NOT NULL,
+                        client_key TEXT NOT NULL REFERENCES clients(client_key),
+
+                        source_type TEXT NOT NULL DEFAULT 'call',
+                        source_id TEXT NOT NULL,
+
+                        workflow_type TEXT NOT NULL DEFAULT 'service_request',
+                        workflow_status TEXT NOT NULL DEFAULT 'created',
+
+                        urgency TEXT,
+                        current_stage TEXT NOT NULL DEFAULT 'intake_completed',
+
+                        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        completed_at TIMESTAMPTZ,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_workflow_instances_client_key
+                    ON workflow_instances(client_key);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_workflow_instances_source
+                    ON workflow_instances(source_type, source_id);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_workflow_instances_status
+                    ON workflow_instances(workflow_status);
+                """)
+
+                # -------------------------------------------------
+                # OPERATIONAL EVENTS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS operational_events (
+                        id SERIAL PRIMARY KEY,
+
+                        event_id TEXT UNIQUE NOT NULL,
+                        workflow_id TEXT REFERENCES workflow_instances(workflow_id),
+
+                        client_key TEXT NOT NULL REFERENCES clients(client_key),
+
+                        source_type TEXT NOT NULL DEFAULT 'system',
+                        source_id TEXT,
+
+                        event_type TEXT NOT NULL,
+                        event_stage TEXT,
+
+                        event_status TEXT NOT NULL DEFAULT 'recorded',
+                        event_metadata JSONB,
+
+                        occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_operational_events_workflow_id
+                    ON operational_events(workflow_id);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_operational_events_client_key
+                    ON operational_events(client_key);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_operational_events_event_type
+                    ON operational_events(event_type);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_operational_events_occurred_at
+                    ON operational_events(occurred_at);
+                """)
+
+                # -------------------------------------------------
                 # CLIENT PLANS TABLE
                 # -------------------------------------------------
                 cur.execute("""
