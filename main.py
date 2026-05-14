@@ -2195,6 +2195,7 @@ def get_call_events(
         logger.exception("Call events read failed")
         return {"status": "error", "message": str(e)}
 
+
 # -------------------------------------------------
 # WORKFLOWS READ ENDPOINT
 # -------------------------------------------------
@@ -2378,6 +2379,7 @@ def get_workflow_events(
     except Exception as e:
         logger.exception("Workflow events read failed")
         return {"status": "error", "message": str(e)}
+
 
 # -------------------------------------------------
 # CLIENT ACCOUNT ENDPOINT
@@ -3921,7 +3923,9 @@ def save_call_record(
                 )
 
                 try:
-                    call_duration_seconds = round(int(duration_ms) / 1000) if duration_ms else 0
+                    call_duration_seconds = (
+                        round(int(duration_ms) / 1000) if duration_ms else 0
+                    )
                 except Exception:
                     call_duration_seconds = 0
 
@@ -4012,7 +4016,7 @@ def save_call_record(
                         processing_latency_ms,
                         escalation_reason,
                         transcript,
-                        ended_at
+                        ended_at,
                     ),
                 )
 
@@ -4031,7 +4035,7 @@ def save_call_record(
                         "call_status": call_status,
                         "webhook_status": webhook_status,
                     },
-                )               
+                )
 
             conn.commit()
 
@@ -4044,6 +4048,7 @@ def save_call_record(
         logger.exception("Call save failed")
 
         return {"saved": False, "error": error}
+
 
 # -------------------------------------------------
 # CALL EVENT PERSISTENCE
@@ -4114,6 +4119,153 @@ def log_call_event(
 # -------------------------------------------------
 # WORKFLOW PERSISTENCE
 # -------------------------------------------------
+def append_workflow_event(
+    cur,
+    workflow_id: str,
+    client_key: str,
+    event_type: str,
+    event_stage: str = None,
+    source_type: str = "system",
+    source_id: str = None,
+    event_status: str = "recorded",
+    metadata: dict = None,
+):
+    """
+    Appends an immutable operational workflow event.
+
+    This is the canonical event-writing primitive for workflow orchestration.
+    Future dispatch, booking, escalation, retry, acknowledgement, and completion
+    stages should use this helper instead of writing directly to operational_events.
+    """
+
+    if not workflow_id or not client_key or not event_type:
+        return None
+
+    safe_metadata = metadata or {}
+
+    event_id = f"{workflow_id}_{event_type}"
+
+    if source_id:
+        event_id = f"{event_id}_{source_id}"
+
+    cur.execute(
+        """
+        INSERT INTO operational_events (
+            event_id,
+            workflow_id,
+            client_key,
+            source_type,
+            source_id,
+            event_type,
+            event_stage,
+            event_status,
+            event_metadata
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (event_id) DO NOTHING;
+        """,
+        (
+            event_id,
+            workflow_id,
+            client_key,
+            source_type,
+            source_id,
+            event_type,
+            event_stage,
+            event_status,
+            Jsonb(safe_metadata),
+        ),
+    )
+
+    return event_id
+
+def update_workflow_state(
+    cur,
+    workflow_id: str,
+    workflow_status: str = None,
+    current_stage: str = None,
+    completed_at=None,
+):
+    """
+    Updates the mutable workflow snapshot.
+
+    The immutable event stream remains the source of truth.
+    This row is the current operational state used for dashboards, filtering,
+    client visibility, and future orchestration.
+    """
+
+    if not workflow_id:
+        return None
+
+    cur.execute(
+        """
+        UPDATE workflow_instances
+        SET
+            workflow_status = COALESCE(%s, workflow_status),
+            current_stage = COALESCE(%s, current_stage),
+            completed_at = COALESCE(%s, completed_at),
+            updated_at = NOW()
+        WHERE workflow_id = %s
+        RETURNING workflow_id;
+        """,
+        (
+            workflow_status,
+            current_stage,
+            completed_at,
+            workflow_id,
+        ),
+    )
+
+    row = cur.fetchone()
+
+    return row[0] if row else None
+
+def advance_workflow_stage(
+    cur,
+    workflow_id: str,
+    client_key: str,
+    event_type: str,
+    event_stage: str,
+    workflow_status: str = None,
+    source_type: str = "system",
+    source_id: str = None,
+    event_status: str = "recorded",
+    metadata: dict = None,
+    completed_at=None,
+):
+    """
+    Canonical workflow transition primitive.
+
+    Appends an immutable operational event and updates the mutable workflow
+    snapshot in one controlled path so lifecycle state and event history remain
+    synchronized.
+    """
+
+    if not workflow_id or not client_key or not event_type or not event_stage:
+        return None
+
+    event_id = append_workflow_event(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type=event_type,
+        event_stage=event_stage,
+        source_type=source_type,
+        source_id=source_id,
+        event_status=event_status,
+        metadata=metadata,
+    )
+
+    update_workflow_state(
+        cur=cur,
+        workflow_id=workflow_id,
+        workflow_status=workflow_status,
+        current_stage=event_stage,
+        completed_at=completed_at,
+    )
+
+    return event_id
+
 def create_workflow_for_call(
     cur,
     call_id: str,
@@ -4169,54 +4321,27 @@ def create_workflow_for_call(
         ),
     )
 
-    cur.execute(
-        """
-        INSERT INTO operational_events (
-            event_id,
-            workflow_id,
-            client_key,
-            source_type,
-            source_id,
-            event_type,
-            event_stage,
-            event_status,
-            event_metadata
-        )
-        VALUES (%s, %s, %s, 'call', %s, 'workflow_created', 'created', 'recorded', %s)
-        ON CONFLICT (event_id) DO NOTHING;
-        """,
-        (
-            f"{workflow_id}_workflow_created",
-            workflow_id,
-            client_key,
-            call_id,
-            Jsonb(event_metadata),
-        ),
+    append_workflow_event(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type="workflow_created",
+        event_stage="created",
+        source_type="call",
+        source_id=call_id,
+        metadata=event_metadata,
     )
 
-    cur.execute(
-        """
-        INSERT INTO operational_events (
-            event_id,
-            workflow_id,
-            client_key,
-            source_type,
-            source_id,
-            event_type,
-            event_stage,
-            event_status,
-            event_metadata
-        )
-        VALUES (%s, %s, %s, 'call', %s, 'intake_completed', 'intake_completed', 'recorded', %s)
-        ON CONFLICT (event_id) DO NOTHING;
-        """,
-        (
-            f"{workflow_id}_intake_completed",
-            workflow_id,
-            client_key,
-            call_id,
-            Jsonb(event_metadata),
-        ),
+    advance_workflow_stage(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type="intake_completed",
+        event_stage="intake_completed",
+        workflow_status="created",
+        source_type="call",
+        source_id=call_id,
+        metadata=event_metadata,
     )
 
     return workflow_id
@@ -4755,29 +4880,14 @@ async def call_summary(
             caller_notified=caller_sent,
             caller_error=caller_error,
             raw_payload=data,
-
             call_status="completed",
             webhook_status="received",
-
             agent_id=call.get("agent_id"),
             call_direction=call.get("direction"),
-
             confidence=extract_tool_confidence(call),
-
-            processing_latency_ms=(
-                call.get("latency", {})
-                .get("e2e", {})
-                .get("p50")
-            ),
-
-            escalation_reason=(
-                "urgent_call"
-                if urgency == "urgent"
-                else None
-            ),
-
+            processing_latency_ms=(call.get("latency", {}).get("e2e", {}).get("p50")),
+            escalation_reason=("urgent_call" if urgency == "urgent" else None),
             transcript=full_transcript,
-
             ended_at=datetime.now(timezone.utc),
         )
 
@@ -4796,9 +4906,7 @@ async def call_summary(
                     "caller_notified": caller_sent,
                     "confidence": extract_tool_confidence(call),
                     "processing_latency_ms": (
-                        call.get("latency", {})
-                        .get("e2e", {})
-                        .get("p50")
+                        call.get("latency", {}).get("e2e", {}).get("p50")
                     ),
                 },
                 event_timestamp=datetime.now(timezone.utc),
@@ -4841,7 +4949,6 @@ async def call_summary(
                 },
                 event_timestamp=datetime.now(timezone.utc),
             )
-
 
         CALL_PHONE_MAP.pop(call_id, None)
         CALL_PHONE_META.pop(call_id, None)
