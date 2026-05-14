@@ -1,0 +1,9 @@
+# -------------------------------------------------
+# DATABASE BACKUPS
+# -------------------------------------------------
+database/backups/
+
+# Optional future local database artifacts
+*.sql
+*.dump
+*.tar.gz
