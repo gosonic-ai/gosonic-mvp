@@ -2195,6 +2195,189 @@ def get_call_events(
         logger.exception("Call events read failed")
         return {"status": "error", "message": str(e)}
 
+# -------------------------------------------------
+# WORKFLOWS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/workflows")
+def get_workflows(client_key: str = Query(None), authorization: str = Header(None)):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                where_sql, params = scoped_where_clause(
+                    "workflow_instances",
+                    effective_client_key,
+                )
+
+                cur.execute(
+                    f"""
+                    SELECT
+                        workflow_id,
+                        client_key,
+                        source_type,
+                        source_id,
+                        workflow_type,
+                        workflow_status,
+                        urgency,
+                        current_stage,
+                        started_at,
+                        completed_at,
+                        created_at,
+                        updated_at
+                    FROM workflow_instances
+                    {where_sql}
+                    ORDER BY created_at DESC
+                    LIMIT 100;
+                """,
+                    params,
+                )
+
+                rows = cur.fetchall()
+
+        workflows = []
+
+        for row in rows:
+            workflows.append(
+                {
+                    "workflow_id": row[0],
+                    "client_key": row[1],
+                    "source_type": row[2],
+                    "source_id": row[3],
+                    "workflow_type": row[4],
+                    "workflow_status": row[5],
+                    "urgency": row[6],
+                    "current_stage": row[7],
+                    "started_at": row[8].isoformat() if row[8] else None,
+                    "completed_at": row[9].isoformat() if row[9] else None,
+                    "created_at": row[10].isoformat() if row[10] else None,
+                    "updated_at": row[11].isoformat() if row[11] else None,
+                }
+            )
+
+        return {
+            "status": "ok",
+            "count": len(workflows),
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
+            "workflows": workflows,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Workflows read failed")
+        return {"status": "error", "message": str(e)}
+
+
+# -------------------------------------------------
+# WORKFLOW EVENTS READ ENDPOINT
+# -------------------------------------------------
+@app.get("/workflows/{workflow_id}/events")
+def get_workflow_events(
+    workflow_id: str,
+    client_key: str = Query(None),
+    authorization: str = Header(None),
+):
+    payload = require_auth_token(authorization)
+    effective_client_key = resolve_effective_client_key(payload, client_key)
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        return {"status": "error", "message": "DATABASE_URL not configured"}
+
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                if effective_client_key:
+                    cur.execute(
+                        """
+                        SELECT
+                            event_id,
+                            workflow_id,
+                            client_key,
+                            source_type,
+                            source_id,
+                            event_type,
+                            event_stage,
+                            event_status,
+                            event_metadata,
+                            occurred_at,
+                            created_at
+                        FROM operational_events
+                        WHERE workflow_id = %s
+                          AND client_key = %s
+                        ORDER BY occurred_at ASC, id ASC;
+                        """,
+                        (workflow_id, effective_client_key),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            event_id,
+                            workflow_id,
+                            client_key,
+                            source_type,
+                            source_id,
+                            event_type,
+                            event_stage,
+                            event_status,
+                            event_metadata,
+                            occurred_at,
+                            created_at
+                        FROM operational_events
+                        WHERE workflow_id = %s
+                        ORDER BY occurred_at ASC, id ASC;
+                        """,
+                        (workflow_id,),
+                    )
+
+                rows = cur.fetchall()
+
+        events = []
+
+        for row in rows:
+            events.append(
+                {
+                    "event_id": row[0],
+                    "workflow_id": row[1],
+                    "client_key": row[2],
+                    "source_type": row[3],
+                    "source_id": row[4],
+                    "event_type": row[5],
+                    "event_stage": row[6],
+                    "event_status": row[7],
+                    "event_metadata": row[8] or {},
+                    "occurred_at": row[9].isoformat() if row[9] else None,
+                    "created_at": row[10].isoformat() if row[10] else None,
+                }
+            )
+
+        return {
+            "status": "ok",
+            "count": len(events),
+            "workflow_id": workflow_id,
+            "scope": "platform" if is_platform_admin(payload) else effective_client_key,
+            "client_key_filter": effective_client_key,
+            "events": events,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.exception("Workflow events read failed")
+        return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
 # CLIENT ACCOUNT ENDPOINT
