@@ -3649,7 +3649,10 @@ def save_call_record(
                     or 0
                 )
 
-                call_duration_seconds = round(duration_ms / 1000) if duration_ms else 0
+                try:
+                    call_duration_seconds = round(int(duration_ms) / 1000) if duration_ms else 0
+                except Exception:
+                    call_duration_seconds = 0
 
                 billable_minutes = round(call_duration_seconds / 60, 2)
 
