@@ -7,3 +7,5 @@ database/backups/
 *.sql
 *.dump
 *.tar.gz
+
+.env
