@@ -3833,6 +3833,23 @@ def save_call_record(
                     ),
                 )
 
+                # -------------------------------------------------
+                # WORKFLOW PERSISTENCE
+                # -------------------------------------------------
+                workflow_id = create_workflow_for_call(
+                    cur=cur,
+                    call_id=call_id,
+                    client_key=client_key,
+                    urgency=urgency,
+                    call_outcome=call_outcome,
+                    metadata={
+                        "issue_type": issue_type,
+                        "sms_policy_reason": sms_policy_reason,
+                        "call_status": call_status,
+                        "webhook_status": webhook_status,
+                    },
+                )               
+
             conn.commit()
 
         logger.info("[CALL SAVED] call_id=%s", call_id)
@@ -3910,6 +3927,116 @@ def log_call_event(
     except Exception as e:
         logger.exception("Call event save failed")
         return {"saved": False, "error": str(e)}
+
+# -------------------------------------------------
+# WORKFLOW PERSISTENCE
+# -------------------------------------------------
+def create_workflow_for_call(
+    cur,
+    call_id: str,
+    client_key: str,
+    urgency: str = None,
+    call_outcome: str = None,
+    metadata: dict = None,
+):
+    """
+    Creates the canonical workflow instance and initial operational events
+    for an analyzed call.
+
+    This is intentionally idempotent:
+    - workflow_id is derived from call_id
+    - inserts use ON CONFLICT DO NOTHING
+    - repeated webhook delivery will not duplicate the workflow
+    """
+
+    if not call_id or not client_key:
+        return None
+
+    workflow_id = f"wf_{call_id}"
+
+    event_metadata = {
+        "call_id": call_id,
+        "urgency": urgency,
+        "call_outcome": call_outcome,
+    }
+
+    if metadata:
+        event_metadata.update(metadata)
+
+    cur.execute(
+        """
+        INSERT INTO workflow_instances (
+            workflow_id,
+            client_key,
+            source_type,
+            source_id,
+            workflow_type,
+            workflow_status,
+            urgency,
+            current_stage
+        )
+        VALUES (%s, %s, 'call', %s, 'service_request', 'created', %s, 'intake_completed')
+        ON CONFLICT (workflow_id) DO NOTHING;
+        """,
+        (
+            workflow_id,
+            client_key,
+            call_id,
+            urgency,
+        ),
+    )
+
+    cur.execute(
+        """
+        INSERT INTO operational_events (
+            event_id,
+            workflow_id,
+            client_key,
+            source_type,
+            source_id,
+            event_type,
+            event_stage,
+            event_status,
+            event_metadata
+        )
+        VALUES (%s, %s, %s, 'call', %s, 'workflow_created', 'created', 'recorded', %s)
+        ON CONFLICT (event_id) DO NOTHING;
+        """,
+        (
+            f"{workflow_id}_workflow_created",
+            workflow_id,
+            client_key,
+            call_id,
+            Jsonb(event_metadata),
+        ),
+    )
+
+    cur.execute(
+        """
+        INSERT INTO operational_events (
+            event_id,
+            workflow_id,
+            client_key,
+            source_type,
+            source_id,
+            event_type,
+            event_stage,
+            event_status,
+            event_metadata
+        )
+        VALUES (%s, %s, %s, 'call', %s, 'intake_completed', 'intake_completed', 'recorded', %s)
+        ON CONFLICT (event_id) DO NOTHING;
+        """,
+        (
+            f"{workflow_id}_intake_completed",
+            workflow_id,
+            client_key,
+            call_id,
+            Jsonb(event_metadata),
+        ),
+    )
+
+    return workflow_id
 
 # -------------------------------------------------
 # SMS ELIGIBILITY ENGINE
