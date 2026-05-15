@@ -2041,36 +2041,46 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                 cur.execute(
                     f"""
                     SELECT
-                        call_id,
-                        client_key,
-                        caller_name,
-                        caller_phone,
-                        service_address,
-                        issue_description,
-                        issue_type,
-                        urgency,
-                        call_outcome,
-                        sms_policy_reason,
-                        business_notified,
-                        business_error,
-                        caller_notified,
-                        caller_error,
-                        call_duration_seconds,
-                        billable_minutes,
-                        call_status,
-                        webhook_status,
-                        agent_id,
-                        call_direction,
-                        confidence,
-                        processing_latency_ms,
-                        escalation_reason,
-                        transcript,
-                        ended_at,
-                        created_at,
-                        raw_payload
+                        calls.call_id,
+                        calls.client_key,
+                        calls.caller_name,
+                        calls.caller_phone,
+                        calls.service_address,
+                        calls.issue_description,
+                        calls.issue_type,
+                        calls.urgency,
+                        calls.call_outcome,
+                        calls.sms_policy_reason,
+                        calls.business_notified,
+                        calls.business_error,
+                        calls.caller_notified,
+                        calls.caller_error,
+                        calls.call_duration_seconds,
+                        calls.billable_minutes,
+                        calls.call_status,
+                        calls.webhook_status,
+                        calls.agent_id,
+                        calls.call_direction,
+                        calls.confidence,
+                        calls.processing_latency_ms,
+                        calls.escalation_reason,
+                        calls.transcript,
+                        calls.ended_at,
+                        calls.created_at,
+                        calls.raw_payload,
+                        workflow_instances.workflow_id,
+                        workflow_instances.workflow_status,
+                        workflow_instances.current_stage,
+                        workflow_instances.last_event_type,
+                        workflow_instances.last_event_at,
+                        workflow_instances.notification_state,
+                        workflow_instances.service_state
                     FROM calls
+                    LEFT JOIN workflow_instances
+                    ON workflow_instances.source_type = 'call'
+                    AND workflow_instances.source_id = calls.call_id
                     {where_sql}
-                    ORDER BY created_at DESC
+                    ORDER BY calls.created_at DESC
                     LIMIT 50;
                 """,
                     params,
@@ -2110,6 +2120,13 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "ended_at": row[24].isoformat() if row[24] else None,
                     "created_at": row[25].isoformat() if row[25] else None,
                     "raw_payload": row[26],
+                    "workflow_id": row[27],
+                    "workflow_status": row[28],
+                    "current_stage": row[29],
+                    "last_event_type": row[30],
+                    "last_event_at": row[31].isoformat() if row[31] else None,
+                    "notification_state": row[32],
+                    "service_state": row[33],
                 }
             )
 
