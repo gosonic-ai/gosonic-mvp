@@ -4481,6 +4481,18 @@ def create_workflow_for_call(
         metadata=event_metadata,
     )
 
+    advance_workflow_stage(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type="triage.completed",
+        event_stage="triaged",
+        workflow_status="active",
+        source_type="call",
+        source_id=call_id,
+        metadata=event_metadata,
+    )
+
     return workflow_id
 
 # -------------------------------------------------
