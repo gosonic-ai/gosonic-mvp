@@ -4403,6 +4403,63 @@ def advance_workflow_stage(
 
     return event_id
 
+
+def advance_workflow_stage_by_workflow_id(
+    workflow_id: str,
+    client_key: str,
+    event_type: str,
+    event_stage: str,
+    workflow_status: str = None,
+    source_type: str = "system",
+    source_id: str = None,
+    event_status: str = "recorded",
+    metadata: dict = None,
+    completed_at=None,
+):
+    """
+    DB-safe workflow transition helper.
+
+    Opens its own database connection, then delegates to the canonical
+    cursor-scoped advance_workflow_stage() primitive. Use this when workflow
+    advancement is needed outside an existing database cursor scope, such as
+    notification, booking, dispatch, integration, or resolution events.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        logger.warning("Workflow stage advancement skipped: DATABASE_URL not configured")
+        return None
+
+    if not workflow_id or not client_key or not event_type or not event_stage:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                event_id = advance_workflow_stage(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    client_key=client_key,
+                    event_type=event_type,
+                    event_stage=event_stage,
+                    workflow_status=workflow_status,
+                    source_type=source_type,
+                    source_id=source_id,
+                    event_status=event_status,
+                    metadata=metadata,
+                    completed_at=completed_at,
+                )
+
+            conn.commit()
+
+        return event_id
+
+    except Exception:
+        logger.exception("Workflow stage advancement failed")
+        return None
+
+
 def create_workflow_for_call(
     cur,
     call_id: str,
@@ -5049,6 +5106,8 @@ async def call_summary(
             ended_at=datetime.now(timezone.utc),
         )
 
+        workflow_id = None
+
         if call_save_result.get("saved"):
             log_call_event(
                 call_id=call_id,
@@ -5083,6 +5142,22 @@ async def call_summary(
                     event_timestamp=datetime.now(timezone.utc),
                 )
 
+                if workflow_id:
+                    advance_workflow_stage_by_workflow_id(
+                        workflow_id=workflow_id,
+                        client_key=client_id,
+                        event_type="notification.business_sent",
+                        event_stage="notification_sent",
+                        workflow_status="active",
+                        source_type="system",
+                        source_id=call_id,
+                        metadata={
+                            "channel": "sms",
+                            "recipient_type": "business",
+                            "sms_policy_reason": sms_policy_reason,
+                        },
+                    )
+
             if caller_sent:
                 log_call_event(
                     call_id=call_id,
@@ -5095,6 +5170,22 @@ async def call_summary(
                     },
                     event_timestamp=datetime.now(timezone.utc),
                 )
+
+                if workflow_id:
+                    advance_workflow_stage_by_workflow_id(
+                        workflow_id=workflow_id,
+                        client_key=client_id,
+                        event_type="notification.caller_sent",
+                        event_stage="notification_sent",
+                        workflow_status="active",
+                        source_type="system",
+                        source_id=call_id,
+                        metadata={
+                            "channel": "sms",
+                            "recipient_type": "caller",
+                            "sms_policy_reason": sms_policy_reason,
+                        },
+                    )
 
             log_call_event(
                 call_id=call_id,
