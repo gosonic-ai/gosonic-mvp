@@ -1375,12 +1375,37 @@ def init_db(x_admin_key: str = Header(None)):
                         urgency TEXT,
                         current_stage TEXT NOT NULL DEFAULT 'intake_completed',
 
+                        last_event_type TEXT,
+                        last_event_at TIMESTAMPTZ,
+                        notification_state TEXT,
+                        service_state TEXT,
+
                         started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         completed_at TIMESTAMPTZ,
 
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     );
+                """)
+
+                cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS last_event_type TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS notification_state TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS service_state TEXT;
                 """)
 
                 cur.execute("""
@@ -4318,6 +4343,9 @@ def update_workflow_state(
     workflow_id: str,
     workflow_status: str = None,
     current_stage: str = None,
+    last_event_type: str = None,
+    notification_state: str = None,
+    service_state: str = None,
     completed_at=None,
 ):
     """
@@ -4340,6 +4368,13 @@ def update_workflow_state(
         SET
             workflow_status = COALESCE(%s, workflow_status),
             current_stage = COALESCE(%s, current_stage),
+            last_event_type = COALESCE(%s, last_event_type),
+            last_event_at = CASE
+                WHEN %s IS NOT NULL THEN NOW()
+                ELSE last_event_at
+            END,
+            notification_state = COALESCE(%s, notification_state),
+            service_state = COALESCE(%s, service_state),
             completed_at = COALESCE(%s, completed_at),
             updated_at = NOW()
         WHERE workflow_id = %s
@@ -4348,6 +4383,10 @@ def update_workflow_state(
         (
             workflow_status,
             current_stage,
+            last_event_type,
+            last_event_type,
+            notification_state,
+            service_state,
             completed_at,
             workflow_id,
         ),
@@ -4385,6 +4424,21 @@ def advance_workflow_stage(
     validate_workflow_stage(event_stage)
     validate_workflow_status(workflow_status)
 
+    notification_state = None
+    service_state = None
+
+    if event_type == "notification.business_sent":
+        notification_state = "business_sent"
+
+    elif event_type == "notification.caller_sent":
+        notification_state = "caller_sent"
+
+    elif event_type == "intake.completed":
+        service_state = "intake_completed"
+
+    elif event_type == "triage.completed":
+        service_state = "triaged"
+
     event_id = append_workflow_event(
         cur=cur,
         workflow_id=workflow_id,
@@ -4402,6 +4456,9 @@ def advance_workflow_stage(
         workflow_id=workflow_id,
         workflow_status=workflow_status,
         current_stage=event_stage,
+        last_event_type=event_type,
+        notification_state=notification_state,
+        service_state=service_state,
         completed_at=completed_at,
     )
 
