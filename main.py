@@ -4119,6 +4119,133 @@ def log_call_event(
 # -------------------------------------------------
 # WORKFLOW PERSISTENCE
 # -------------------------------------------------
+# -------------------------------------------------
+# WORKFLOW LIFECYCLE CANON
+# -------------------------------------------------
+WORKFLOW_STATUSES = {
+    "created",
+    "active",
+    "awaiting_external",
+    "escalated",
+    "paused",
+    "completed",
+    "cancelled",
+    "failed",
+    "expired",
+}
+
+WORKFLOW_STAGES = {
+    "initiated",
+    "intake_in_progress",
+    "intake_completed",
+    "triage_pending",
+    "triaged",
+    "notification_pending",
+    "notification_sent",
+    "scheduling_pending",
+    "scheduled",
+    "dispatch_pending",
+    "dispatched",
+    "acknowledged",
+    "resolution_pending",
+    "completed",
+    "escalation_required",
+    "failed",
+    "cancelled",
+}
+
+OPERATIONAL_EVENT_TYPES = {
+    "call.received",
+    "call.started",
+    "call.completed",
+    "call.analyzed",
+    "call.failed",
+
+    "workflow.created",
+    "workflow.activated",
+    "workflow.stage_changed",
+    "workflow.status_changed",
+    "workflow.completed",
+    "workflow.failed",
+    "workflow.cancelled",
+    "workflow.expired",
+
+    "intake.started",
+    "intake.completed",
+    "intake.incomplete",
+    "intake.corrected",
+
+    "triage.started",
+    "triage.completed",
+    "triage.urgent_detected",
+    "triage.standard_detected",
+    "triage.failed",
+
+    "notification.business_sent",
+    "notification.business_failed",
+    "notification.caller_sent",
+    "notification.caller_failed",
+
+    "booking.requested",
+    "booking.availability_checked",
+    "booking.slot_offered",
+    "booking.confirmed",
+    "booking.failed",
+    "booking.cancelled",
+
+    "dispatch.requested",
+    "dispatch.assigned",
+    "dispatch.acknowledged",
+    "dispatch.completed",
+    "dispatch.failed",
+
+    "escalation.required",
+    "escalation.created",
+    "escalation.notified",
+    "escalation.resolved",
+
+    "integration.connected",
+    "integration.disconnected",
+    "integration.sync_started",
+    "integration.sync_completed",
+    "integration.sync_failed",
+
+    "system.webhook_received",
+    "system.webhook_verified",
+    "system.persistence_succeeded",
+    "system.persistence_failed",
+}
+
+
+def validate_workflow_status(status: str):
+    if status is None:
+        return None
+
+    if status not in WORKFLOW_STATUSES:
+        raise ValueError(f"Invalid workflow_status: {status}")
+
+    return status
+
+
+def validate_workflow_stage(stage: str):
+    if stage is None:
+        return None
+
+    if stage not in WORKFLOW_STAGES:
+        raise ValueError(f"Invalid workflow stage: {stage}")
+
+    return stage
+
+
+def validate_operational_event_type(event_type: str):
+    if event_type is None:
+        return None
+
+    if event_type not in OPERATIONAL_EVENT_TYPES:
+        raise ValueError(f"Invalid operational event_type: {event_type}")
+
+    return event_type
+
 def append_workflow_event(
     cur,
     workflow_id: str,
@@ -4140,6 +4267,9 @@ def append_workflow_event(
 
     if not workflow_id or not client_key or not event_type:
         return None
+    
+    validate_operational_event_type(event_type)
+    validate_workflow_stage(event_stage)
 
     safe_metadata = metadata or {}
 
@@ -4196,6 +4326,9 @@ def update_workflow_state(
 
     if not workflow_id:
         return None
+    
+    validate_workflow_status(workflow_status)
+    validate_workflow_stage(current_stage)
 
     cur.execute(
         """
@@ -4243,6 +4376,10 @@ def advance_workflow_stage(
 
     if not workflow_id or not client_key or not event_type or not event_stage:
         return None
+    
+    validate_operational_event_type(event_type)
+    validate_workflow_stage(event_stage)
+    validate_workflow_status(workflow_status)
 
     event_id = append_workflow_event(
         cur=cur,
@@ -4310,7 +4447,7 @@ def create_workflow_for_call(
             urgency,
             current_stage
         )
-        VALUES (%s, %s, 'call', %s, 'service_request', 'created', %s, 'intake_completed')
+        VALUES (%s, %s, 'call', %s, 'service_request', 'active', %s, 'intake_completed')
         ON CONFLICT (workflow_id) DO NOTHING;
         """,
         (
@@ -4325,8 +4462,8 @@ def create_workflow_for_call(
         cur=cur,
         workflow_id=workflow_id,
         client_key=client_key,
-        event_type="workflow_created",
-        event_stage="created",
+        event_type="workflow.created",
+        event_stage="initiated",
         source_type="call",
         source_id=call_id,
         metadata=event_metadata,
@@ -4336,9 +4473,9 @@ def create_workflow_for_call(
         cur=cur,
         workflow_id=workflow_id,
         client_key=client_key,
-        event_type="intake_completed",
+        event_type="intake.completed",
         event_stage="intake_completed",
-        workflow_status="created",
+        workflow_status="active",
         source_type="call",
         source_id=call_id,
         metadata=event_metadata,
@@ -4562,7 +4699,16 @@ async def call_summary(
 
         cleanup_state()
 
-        event_type = data.get("event") or data.get("type")
+        raw_event_type = data.get("event") or data.get("type")
+
+        RETELL_EVENT_TYPE_MAP = {
+            "call_started": "call.started",
+            "call_ended": "call.completed",
+            "call_analyzed": "call.analyzed",
+        }
+
+        event_type = RETELL_EVENT_TYPE_MAP.get(raw_event_type, raw_event_type)
+
         call = data.get("call") or {}
 
         call_id = data.get("call_id") or data.get("id") or call.get("call_id")
@@ -4572,7 +4718,7 @@ async def call_summary(
 
         metadata = call.get("metadata") or {}
 
-        if event_type == "call_started":
+        if event_type == "call.started":
             caller_phone_raw = (
                 data.get("caller_phone")
                 or call.get("from_number")
@@ -4599,7 +4745,7 @@ async def call_summary(
                     "[PHONE STORED]", call_id=call_id, caller_phone=formatted_phone
                 )
             else:
-                logger.warning("[PHONE NOT FOUND ON CALL_STARTED] call_id=%s", call_id)
+                logger.warning("[PHONE NOT FOUND ON CALL.STARTED] call_id=%s", call_id)
 
             return {
                 "status": "phone_capture_processed",
@@ -4607,7 +4753,7 @@ async def call_summary(
                 "caller_phone": formatted_phone,
             }
 
-        if event_type != "call_analyzed":
+        if event_type != "call.analyzed":
             return {"status": "ignored_event", "event_type": event_type}
 
         now = time.time()
@@ -4895,7 +5041,7 @@ async def call_summary(
             log_call_event(
                 call_id=call_id,
                 client_key=client_id,
-                event_type="call_analyzed",
+                event_type="call.analyzed",
                 event_metadata={
                     "call_status": "completed",
                     "webhook_status": "received",
@@ -4916,7 +5062,7 @@ async def call_summary(
                 log_call_event(
                     call_id=call_id,
                     client_key=client_id,
-                    event_type="business_sms_sent",
+                    event_type="notification.business_sent",
                     event_metadata={
                         "channel": "sms",
                         "recipient_type": "business",
@@ -4929,7 +5075,7 @@ async def call_summary(
                 log_call_event(
                     call_id=call_id,
                     client_key=client_id,
-                    event_type="caller_sms_sent",
+                    event_type="notification.caller_sent",
                     event_metadata={
                         "channel": "sms",
                         "recipient_type": "caller",
@@ -4941,7 +5087,7 @@ async def call_summary(
             log_call_event(
                 call_id=call_id,
                 client_key=client_id,
-                event_type="call_saved",
+                event_type="system.persistence_succeeded",
                 event_metadata={
                     "storage": "postgresql",
                     "call_status": "completed",
@@ -4971,8 +5117,8 @@ async def call_summary(
             "business_error": business_error,
             "caller_notified": caller_sent,
             "caller_error": caller_error,
-            "call_saved": call_save_result["saved"],
-            "call_save_error": call_save_result["error"],
+            "persistence_succeeded": call_save_result["saved"],
+            "persistence_error": call_save_result["error"],
         }
 
     except Exception as e:
