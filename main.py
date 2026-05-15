@@ -4370,7 +4370,7 @@ def update_workflow_state(
             current_stage = COALESCE(%s, current_stage),
             last_event_type = COALESCE(%s, last_event_type),
             last_event_at = CASE
-                WHEN %s IS NOT NULL THEN NOW()
+                WHEN %s::text IS NOT NULL THEN NOW()
                 ELSE last_event_at
             END,
             notification_state = COALESCE(%s, notification_state),
