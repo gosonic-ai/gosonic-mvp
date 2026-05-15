@@ -4041,7 +4041,11 @@ def save_call_record(
 
         logger.info("[CALL SAVED] call_id=%s", call_id)
 
-        return {"saved": True, "error": None}
+        return {
+            "saved": True,
+            "error": None,
+            "workflow_id": workflow_id,
+        }
 
     except Exception as e:
         error = str(e)
@@ -5106,7 +5110,7 @@ async def call_summary(
             ended_at=datetime.now(timezone.utc),
         )
 
-        workflow_id = None
+        workflow_id = call_save_result.get("workflow_id")
 
         if call_save_result.get("saved"):
             log_call_event(
