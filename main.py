@@ -4215,6 +4215,7 @@ WORKFLOW_STAGES = {
     "escalation_required",
     "failed",
     "cancelled",
+    "service",
 }
 
 OPERATIONAL_EVENT_TYPES = {
