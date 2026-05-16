@@ -4277,6 +4277,17 @@ OPERATIONAL_EVENT_TYPES = {
     "system.webhook_verified",
     "system.persistence_succeeded",
     "system.persistence_failed",
+
+    "service.pending",
+    "service.triaged",
+    "service.awaiting_dispatch",
+    "service.scheduled",
+    "service.assigned",
+    "service.in_progress",
+    "service.resolved",
+    "service.failed",
+    "workflow.resolved",
+    "workflow.failed",
 }
 
 
@@ -4719,6 +4730,15 @@ def create_workflow_for_call(
         source_type="call",
         source_id=call_id,
         metadata=event_metadata,
+    )
+
+    advance_service_state(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        service_state="triaged",
+        source_id=call_id,
+        event_metadata=event_metadata,
     )
 
     return workflow_id
