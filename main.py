@@ -2100,31 +2100,12 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
             service_state = row[33]
             urgency = row[7]
 
-            queue_state = "new"
-
-            if (
-                urgency == "urgent"
-                and service_state != "resolved"
-            ):
-                queue_state = "escalated"
-
-            elif workflow_status in ["failed", "error"]:
-                queue_state = "failed"
-
-            elif service_state == "resolved":
-                queue_state = "resolved"
-
-            elif notification_state in [
-                "business_sent",
-                "caller_sent",
-            ]:
-                queue_state = "awaiting_service"
-
-            elif workflow_status in [
-                "active",
-                "in_progress",
-            ]:
-                queue_state = "active"
+            queue_state = compute_queue_state(
+                urgency=urgency,
+                workflow_status=workflow_status,
+                notification_state=notification_state,
+                service_state=service_state,
+            )
 
             calls.append(
                 {
@@ -4328,6 +4309,29 @@ def validate_operational_event_type(event_type: str):
 
     return event_type
 
+def compute_queue_state(
+    urgency: str = None,
+    workflow_status: str = None,
+    notification_state: str = None,
+    service_state: str = None,
+):
+    if urgency == "urgent" and service_state != "resolved":
+        return "escalated"
+
+    if workflow_status in ["failed", "error"]:
+        return "failed"
+
+    if service_state == "resolved":
+        return "resolved"
+
+    if notification_state in ["business_sent", "caller_sent"]:
+        return "awaiting_service"
+
+    if workflow_status in ["active", "in_progress"]:
+        return "active"
+
+    return "new"
+
 def append_workflow_event(
     cur,
     workflow_id: str,
@@ -4513,6 +4517,59 @@ def advance_workflow_stage(
         notification_state=notification_state,
         service_state=service_state,
         completed_at=completed_at,
+    )
+
+    return event_id
+
+
+def advance_service_state(
+    cur,
+    workflow_id: str,
+    client_key: str,
+    service_state: str,
+    source_id: str = None,
+    event_metadata: dict = None,
+):
+    if service_state not in {
+        "pending",
+        "triaged",
+        "awaiting_dispatch",
+        "scheduled",
+        "assigned",
+        "in_progress",
+        "resolved",
+        "failed",
+    }:
+        raise ValueError(f"Invalid service_state: {service_state}")
+
+    event_id = append_workflow_event(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type=f"service.{service_state}",
+        event_stage="service",
+        source_type="workflow",
+        source_id=source_id,
+        metadata=event_metadata or {},
+    )
+
+    cur.execute(
+        """
+        UPDATE workflow_instances
+        SET
+            service_state = %s,
+            last_event_type = %s,
+            last_event_at = NOW(),
+            updated_at = NOW()
+        WHERE workflow_id = %s
+          AND client_key = %s;
+        """,
+        (
+            service_state,
+            f"service.{service_state}",
+            workflow_id,
+            client_key,
+        ),
     )
 
     return event_id
