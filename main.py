@@ -2091,6 +2091,41 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
         calls = []
 
         for row in rows:
+            # -------------------------------------------------
+            # CANONICAL QUEUE STATE
+            # -------------------------------------------------
+            workflow_status = row[28]
+            current_stage = row[29]
+            notification_state = row[32]
+            service_state = row[33]
+            urgency = row[7]
+
+            queue_state = "new"
+
+            if (
+                urgency == "urgent"
+                and service_state != "resolved"
+            ):
+                queue_state = "escalated"
+
+            elif workflow_status in ["failed", "error"]:
+                queue_state = "failed"
+
+            elif service_state == "resolved":
+                queue_state = "resolved"
+
+            elif notification_state in [
+                "business_sent",
+                "caller_sent",
+            ]:
+                queue_state = "awaiting_service"
+
+            elif workflow_status in [
+                "active",
+                "in_progress",
+            ]:
+                queue_state = "active"
+
             calls.append(
                 {
                     "call_id": row[0],
@@ -2121,8 +2156,9 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "created_at": row[25].isoformat() if row[25] else None,
                     "raw_payload": row[26],
                     "workflow_id": row[27],
-                    "workflow_status": row[28],
-                    "current_stage": row[29],
+                    "workflow_status": workflow_status,
+                    "queue_state": queue_state,
+                    "current_stage": current_stage,
                     "last_event_type": row[30],
                     "last_event_at": row[31].isoformat() if row[31] else None,
                     "notification_state": row[32],
