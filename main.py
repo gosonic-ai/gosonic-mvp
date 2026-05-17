@@ -2529,9 +2529,14 @@ def acknowledge_operator_request(token: str):
                 if used_at:
                     return """
                     <html>
-                        <body style="font-family: system-ui; padding: 40px;">
-                            <h2>Already acknowledged</h2>
-                            <p>This service request has already been confirmed as received.</p>
+                        <head>
+                            <meta name="viewport" content="width=device-width, initial-scale=1">
+                        </head>
+                        <body style="font-family: system-ui; padding: 48px 28px; font-size: 22px; line-height: 1.45;">
+                            <h1 style="font-size: 36px; margin-bottom: 16px;">Already acknowledged</h1>
+                            <p style="max-width: 620px;">
+                                This service request has already been confirmed as received.
+                            </p>
                         </body>
                     </html>
                     """
@@ -2583,9 +2588,14 @@ def acknowledge_operator_request(token: str):
 
         return """
         <html>
-            <body style="font-family: system-ui; padding: 40px;">
-                <h2>Request acknowledged</h2>
-                <p>Gosonic has recorded that this service request was received.</p>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body style="font-family: system-ui; padding: 48px 28px; font-size: 22px; line-height: 1.45;">
+                <h1 style="font-size: 36px; margin-bottom: 16px;">Request acknowledged</h1>
+                <p style="max-width: 620px;">
+                    Gosonic has recorded that this service request was received.
+                </p>
             </body>
         </html>
         """
