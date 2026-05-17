@@ -4447,19 +4447,39 @@ def compute_queue_state(
     notification_state: str = None,
     service_state: str = None,
 ):
-    if urgency == "urgent" and service_state != "resolved":
-        return "escalated"
+    """
+    Computes the operational queue state exposed to the admin console.
 
-    if workflow_status in ["failed", "error"]:
+    Priority/urgency is intentionally separate from workflow queue state.
+    An urgent service request is not automatically escalated unless the
+    workflow itself enters an escalation/failure/intervention condition.
+    """
+    workflow_status = (workflow_status or "").strip().lower()
+    notification_state = (notification_state or "").strip().lower()
+    service_state = (service_state or "").strip().lower()
+
+    if workflow_status in {"failed", "error"} or service_state == "failed":
         return "failed"
 
-    if service_state == "resolved":
+    if workflow_status == "escalated":
+        return "escalated"
+
+    if workflow_status in {"resolved", "completed"} or service_state == "resolved":
         return "resolved"
 
-    if notification_state in ["business_sent", "caller_sent"]:
+    if service_state in {
+        "triaged",
+        "awaiting_dispatch",
+        "scheduled",
+        "assigned",
+        "in_progress",
+    }:
         return "awaiting_service"
 
-    if workflow_status in ["active", "in_progress"]:
+    if notification_state in {"business_sent", "caller_sent"}:
+        return "awaiting_service"
+
+    if workflow_status in {"active", "created", "in_progress"}:
         return "active"
 
     return "new"
