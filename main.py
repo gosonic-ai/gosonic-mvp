@@ -2441,6 +2441,115 @@ def get_workflow_events(
 
 
 # -------------------------------------------------
+# SERVICE STATE TRANSITION VALIDATION
+# -------------------------------------------------
+SERVICE_STATE_TRANSITIONS = {
+    "pending": {"triaged", "failed"},
+    "intake_completed": {"triaged", "failed"},
+    "triaged": {"awaiting_dispatch", "failed"},
+    "awaiting_dispatch": {"scheduled", "failed"},
+    "scheduled": {"assigned", "failed"},
+    "assigned": {"in_progress", "failed"},
+    "in_progress": {"resolved", "failed"},
+}
+
+TERMINAL_WORKFLOW_STATUSES = {"resolved", "failed"}
+TERMINAL_SERVICE_STATES = {"resolved", "failed"}
+
+
+def normalize_service_state(value):
+    return (value or "pending").strip().lower()
+
+
+def get_workflow_state_for_transition(workflow_id: str, client_key: str):
+    """
+    Fetch the current workflow snapshot before allowing a service-state transition.
+
+    This protects the event stream and mutable workflow snapshot from invalid
+    backward transitions, skipped lifecycle states, or reopening terminal workflows.
+    """
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        logger.warning("Workflow transition validation skipped: DATABASE_URL not configured")
+        return None
+
+    if not workflow_id or not client_key:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        workflow_status,
+                        service_state
+                    FROM workflow_instances
+                    WHERE workflow_id = %s
+                      AND client_key = %s
+                    LIMIT 1;
+                    """,
+                    (workflow_id, client_key),
+                )
+
+                row = cur.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "workflow_status": row[0],
+            "service_state": row[1],
+        }
+
+    except Exception:
+        logger.exception("Workflow transition state lookup failed")
+        return None
+
+
+def validate_service_state_transition(
+    current_workflow_status: str,
+    current_service_state: str,
+    requested_service_state: str,
+):
+    """
+    Enforce canonical service lifecycle progression.
+
+    The service-state endpoint must not allow arbitrary state jumps or reopening
+    terminal workflows. UI controls should reflect these backend rules.
+    """
+    workflow_status = (current_workflow_status or "").strip().lower()
+    current_state = normalize_service_state(current_service_state)
+    requested_state = normalize_service_state(requested_service_state)
+
+    if workflow_status in TERMINAL_WORKFLOW_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"workflow is already terminal: {workflow_status}",
+        )
+
+    if current_state in TERMINAL_SERVICE_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"service workflow is already terminal: {current_state}",
+        )
+
+    allowed_next_states = SERVICE_STATE_TRANSITIONS.get(current_state, set())
+
+    if requested_state not in allowed_next_states:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "invalid service_state transition: "
+                f"{current_state} -> {requested_state}"
+            ),
+        )
+
+    return True
+
+
+# -------------------------------------------------
 # WORKFLOW SERVICE STATE UPDATE ENDPOINT
 # -------------------------------------------------
 @app.post("/workflows/{workflow_id}/service-state")
@@ -2483,11 +2592,27 @@ async def update_workflow_service_state(
     if service_state not in allowed_service_states:
         raise HTTPException(status_code=400, detail="invalid service_state")
 
+    workflow_snapshot = get_workflow_state_for_transition(
+        workflow_id=workflow_id,
+        client_key=client_key,
+    )
+
+    if not workflow_snapshot:
+        raise HTTPException(status_code=404, detail="workflow not found")
+
+    validate_service_state_transition(
+        current_workflow_status=workflow_snapshot.get("workflow_status"),
+        current_service_state=workflow_snapshot.get("service_state"),
+        requested_service_state=service_state,
+    )
+
     event_metadata = {
         "reason": reason,
         "actor": "platform_admin",
         "source": "manual_admin_endpoint",
         "requested_by": payload.get("email"),
+        "previous_workflow_status": workflow_snapshot.get("workflow_status"),
+        "previous_service_state": workflow_snapshot.get("service_state"),
     }
 
     if service_state == "resolved":
