@@ -2478,10 +2478,97 @@ def get_workflow_events(
         return {"status": "error", "message": str(e)}
 
 # -------------------------------------------------
-# OPERATOR ACKNOWLEDGEMENT ENDPOINT
+# OPERATOR ACKNOWLEDGEMENT ENDPOINTS
 # -------------------------------------------------
 @app.get("/operator/ack/{token}", response_class=HTMLResponse)
 def acknowledge_operator_request(token: str):
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        raise HTTPException(status_code=500, detail="DATABASE_URL not configured")
+
+    token_hash = hash_operator_token(token)
+
+    if not token_hash:
+        raise HTTPException(status_code=400, detail="Invalid acknowledgement token")
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        expires_at,
+                        used_at
+                    FROM operator_action_tokens
+                    WHERE token_hash = %s
+                    LIMIT 1;
+                    """,
+                    (token_hash,),
+                )
+
+                row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail="Acknowledgement link not found",
+            )
+
+        used_at = row[2]
+
+        if used_at:
+            return """
+            <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                </head>
+                <body style="font-family: system-ui; padding: 48px 28px; font-size: 22px; line-height: 1.45;">
+                    <h1 style="font-size: 36px; margin-bottom: 16px;">Already acknowledged</h1>
+                    <p style="max-width: 620px;">
+                        This service request has already been confirmed as received.
+                    </p>
+                </body>
+            </html>
+            """
+
+        return f"""
+        <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body style="font-family: system-ui; padding: 48px 28px; font-size: 22px; line-height: 1.45;">
+                <h1 style="font-size: 36px; margin-bottom: 16px;">Confirm request received</h1>
+                <p style="max-width: 620px;">
+                    Tap the button below to confirm this service request was received.
+                </p>
+
+                <form method="post" action="/operator/ack/{token}/confirm">
+                    <button
+                        type="submit"
+                        style="font-size: 22px; padding: 18px 24px; border-radius: 12px; border: 0; background: #111; color: #fff; margin-top: 18px;"
+                    >
+                        Confirm received
+                    </button>
+                </form>
+            </body>
+        </html>
+        """
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception("Operator acknowledgement page failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Operator acknowledgement page failed",
+        )
+
+
+@app.post("/operator/ack/{token}/confirm", response_class=HTMLResponse)
+def confirm_operator_acknowledgement(token: str):
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
@@ -2557,7 +2644,7 @@ def acknowledge_operator_request(token: str):
                     source_id=workflow_id,
                     metadata={
                         "action_type": action_type,
-                        "action_source": "sms_link",
+                        "action_source": "sms_link_button",
                     },
                 )
 
@@ -2604,10 +2691,10 @@ def acknowledge_operator_request(token: str):
         raise
 
     except Exception:
-        logger.exception("Operator acknowledgement failed")
+        logger.exception("Operator acknowledgement confirmation failed")
         raise HTTPException(
             status_code=500,
-            detail="Operator acknowledgement failed",
+            detail="Operator acknowledgement confirmation failed",
         )
 
 # -------------------------------------------------
