@@ -2499,6 +2499,12 @@ async def update_workflow_service_state(
             event_metadata=event_metadata,
         )
 
+        if not event_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Workflow resolution failed before event persistence",
+            )
+
         return {
             "status": "ok",
             "message": "Workflow resolved",
@@ -2517,6 +2523,12 @@ async def update_workflow_service_state(
             failure_reason=reason,
             event_metadata=event_metadata,
         )
+
+        if not event_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Workflow failure failed before event persistence",
+            )
 
         return {
             "status": "ok",
@@ -4298,6 +4310,7 @@ WORKFLOW_STATUSES = {
     "escalated",
     "paused",
     "completed",
+    "resolved",
     "cancelled",
     "failed",
     "expired",
@@ -4318,6 +4331,7 @@ WORKFLOW_STAGES = {
     "acknowledged",
     "resolution_pending",
     "completed",
+    "resolved",
     "escalation_required",
     "failed",
     "cancelled",
