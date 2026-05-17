@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from twilio.rest import Client
 from psycopg.types.json import Jsonb
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,8 @@ import time
 import re
 import logging
 import json
+import secrets
+import hashlib
 
 from app.config import (
     APP_NAME,
@@ -1470,6 +1473,41 @@ def init_db(x_admin_key: str = Header(None)):
                 """)
 
                 # -------------------------------------------------
+                # OPERATOR ACTION TOKENS TABLE
+                # -------------------------------------------------
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS operator_action_tokens (
+                        id SERIAL PRIMARY KEY,
+
+                        workflow_id TEXT NOT NULL
+                            REFERENCES workflow_instances(workflow_id)
+                            ON DELETE CASCADE,
+
+                        client_key TEXT NOT NULL
+                            REFERENCES clients(client_key)
+                            ON DELETE CASCADE,
+
+                        action_type TEXT NOT NULL,
+                        token_hash TEXT UNIQUE NOT NULL,
+
+                        expires_at TIMESTAMPTZ NOT NULL,
+                        used_at TIMESTAMPTZ,
+
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_operator_action_tokens_workflow_id
+                    ON operator_action_tokens(workflow_id);
+                """)
+
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_operator_action_tokens_token_hash
+                    ON operator_action_tokens(token_hash);
+                """)
+
+                # -------------------------------------------------
                 # CLIENT PLANS TABLE
                 # -------------------------------------------------
                 cur.execute("""
@@ -2439,6 +2477,128 @@ def get_workflow_events(
         logger.exception("Workflow events read failed")
         return {"status": "error", "message": str(e)}
 
+# -------------------------------------------------
+# OPERATOR ACKNOWLEDGEMENT ENDPOINT
+# -------------------------------------------------
+@app.get("/operator/ack/{token}", response_class=HTMLResponse)
+def acknowledge_operator_request(token: str):
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        raise HTTPException(status_code=500, detail="DATABASE_URL not configured")
+
+    token_hash = hash_operator_token(token)
+
+    if not token_hash:
+        raise HTTPException(status_code=400, detail="Invalid acknowledgement token")
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        workflow_id,
+                        client_key,
+                        action_type,
+                        expires_at,
+                        used_at
+                    FROM operator_action_tokens
+                    WHERE token_hash = %s
+                    LIMIT 1;
+                    """,
+                    (token_hash,),
+                )
+
+                row = cur.fetchone()
+
+                if not row:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Acknowledgement link not found",
+                    )
+
+                token_id = row[0]
+                workflow_id = row[1]
+                client_key = row[2]
+                action_type = row[3]
+                expires_at = row[4]
+                used_at = row[5]
+
+                if used_at:
+                    return """
+                    <html>
+                        <body style="font-family: system-ui; padding: 40px;">
+                            <h2>Already acknowledged</h2>
+                            <p>This service request has already been confirmed as received.</p>
+                        </body>
+                    </html>
+                    """
+
+                if expires_at and expires_at < datetime.now(timezone.utc):
+                    raise HTTPException(
+                        status_code=410,
+                        detail="Acknowledgement link expired",
+                    )
+
+                event_id = append_workflow_event(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    client_key=client_key,
+                    event_type="operator.acknowledged",
+                    event_stage="notification_sent",
+                    source_type="operator",
+                    source_id=workflow_id,
+                    metadata={
+                        "action_type": action_type,
+                        "action_source": "sms_link",
+                    },
+                )
+
+                if not event_id:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Operator acknowledgement failed before event persistence",
+                    )
+
+                update_workflow_state(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    workflow_status="active",
+                    current_stage="notification_sent",
+                    last_event_type="operator.acknowledged",
+                )
+
+                cur.execute(
+                    """
+                    UPDATE operator_action_tokens
+                    SET used_at = NOW()
+                    WHERE id = %s;
+                    """,
+                    (token_id,),
+                )
+
+            conn.commit()
+
+        return """
+        <html>
+            <body style="font-family: system-ui; padding: 40px;">
+                <h2>Request acknowledged</h2>
+                <p>Gosonic has recorded that this service request was received.</p>
+            </body>
+        </html>
+        """
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        logger.exception("Operator acknowledgement failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Operator acknowledgement failed",
+        )
 
 # -------------------------------------------------
 # SERVICE STATE TRANSITION VALIDATION
@@ -4514,6 +4674,8 @@ OPERATIONAL_EVENT_TYPES = {
     "dispatch.completed",
     "dispatch.failed",
 
+    "operator.acknowledged",
+
     "escalation.required",
     "escalation.created",
     "escalation.notified",
@@ -4677,6 +4839,65 @@ def append_workflow_event(
     )
 
     return event_id
+
+def hash_operator_token(token: str):
+    if not token:
+        return None
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_operator_action_token(
+    cur,
+    workflow_id: str,
+    client_key: str,
+    action_type: str = "operator_acknowledge",
+    expires_hours: int = 48,
+):
+    if not workflow_id or not client_key or not action_type:
+        return None
+
+    token = secrets.token_urlsafe(32)
+    token_hash = hash_operator_token(token)
+
+    cur.execute(
+        """
+        INSERT INTO operator_action_tokens (
+            workflow_id,
+            client_key,
+            action_type,
+            token_hash,
+            expires_at
+        )
+        VALUES (%s, %s, %s, %s, NOW() + (%s || ' hours')::interval)
+        RETURNING id;
+        """,
+        (
+            workflow_id,
+            client_key,
+            action_type,
+            token_hash,
+            expires_hours,
+        ),
+    )
+
+    row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return token
+
+def build_operator_ack_url(token: str):
+    if not token:
+        return None
+
+    base_url = os.getenv("PUBLIC_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL")
+
+    if not base_url:
+        base_url = "https://gosonic-mvp.onrender.com"
+
+    return f"{base_url.rstrip('/')}/operator/ack/{token}"
 
 def update_workflow_state(
     cur,
@@ -5731,6 +5952,11 @@ async def call_summary(
         business_sent = False
         business_error = None
 
+        caller_sent = False
+        caller_error = None
+
+        operator_ack_url = None
+
         sms_from_number = client_settings.get("twilio_outbound_number") or TWILIO_PHONE
 
         if send_business_sms and twilio_client and sms_from_number:
@@ -5840,6 +6066,39 @@ async def call_summary(
         )
 
         workflow_id = call_save_result.get("workflow_id")
+
+        if workflow_id and send_business_sms:
+            try:
+                with psycopg.connect(os.getenv("DATABASE_URL")) as conn:
+                    with conn.cursor() as cur:
+                        operator_ack_token = create_operator_action_token(
+                            cur=cur,
+                            workflow_id=workflow_id,
+                            client_key=client_id,
+                            action_type="operator_acknowledge",
+                            expires_hours=48,
+                        )
+
+                    conn.commit()
+
+                operator_ack_url = build_operator_ack_url(operator_ack_token)
+
+                if operator_ack_url and business_sent and twilio_client and sms_from_number:
+                    twilio_client.messages.create(
+                        body=(
+                            "Gosonic acknowledgement link:\n"
+                            f"{operator_ack_url}\n\n"
+                            "Tap to confirm this request was received."
+                        ),
+                        from_=sms_from_number,
+                        to=client["business_phone"],
+                    )
+                    logger.info("[TWILIO OPERATOR ACK LINK] Sent")
+
+            except Exception:
+                logger.exception(
+                    "Operator acknowledgement token or SMS link delivery failed"
+                )
 
         if call_save_result.get("saved"):
             log_call_event(
