@@ -2441,6 +2441,112 @@ def get_workflow_events(
 
 
 # -------------------------------------------------
+# WORKFLOW SERVICE STATE UPDATE ENDPOINT
+# -------------------------------------------------
+@app.post("/workflows/{workflow_id}/service-state")
+async def update_workflow_service_state(
+    workflow_id: str,
+    request: Request,
+    authorization: str = Header(None),
+):
+    payload = require_auth_token(authorization)
+
+    if not is_platform_admin(payload):
+        raise HTTPException(status_code=403, detail="Platform admin access required")
+
+    data = await request.json()
+
+    client_key = (data.get("client_key") or "").strip()
+    service_state = (data.get("service_state") or "").strip()
+    reason = (data.get("reason") or "manual_admin_update").strip()
+
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+
+    if not client_key:
+        raise HTTPException(status_code=400, detail="client_key is required")
+
+    if not service_state:
+        raise HTTPException(status_code=400, detail="service_state is required")
+
+    allowed_service_states = {
+        "pending",
+        "triaged",
+        "awaiting_dispatch",
+        "scheduled",
+        "assigned",
+        "in_progress",
+        "resolved",
+        "failed",
+    }
+
+    if service_state not in allowed_service_states:
+        raise HTTPException(status_code=400, detail="invalid service_state")
+
+    event_metadata = {
+        "reason": reason,
+        "actor": "platform_admin",
+        "source": "manual_admin_endpoint",
+        "requested_by": payload.get("email"),
+    }
+
+    if service_state == "resolved":
+        event_id = resolve_workflow_by_workflow_id(
+            workflow_id=workflow_id,
+            client_key=client_key,
+            source_id=workflow_id,
+            resolution_reason=reason,
+            event_metadata=event_metadata,
+        )
+
+        return {
+            "status": "ok",
+            "message": "Workflow resolved",
+            "workflow_id": workflow_id,
+            "client_key": client_key,
+            "service_state": "resolved",
+            "workflow_status": "resolved",
+            "event_id": event_id,
+        }
+
+    if service_state == "failed":
+        event_id = fail_workflow_by_workflow_id(
+            workflow_id=workflow_id,
+            client_key=client_key,
+            source_id=workflow_id,
+            failure_reason=reason,
+            event_metadata=event_metadata,
+        )
+
+        return {
+            "status": "ok",
+            "message": "Workflow failed",
+            "workflow_id": workflow_id,
+            "client_key": client_key,
+            "service_state": "failed",
+            "workflow_status": "failed",
+            "event_id": event_id,
+        }
+
+    event_id = advance_service_state_by_workflow_id(
+        workflow_id=workflow_id,
+        client_key=client_key,
+        service_state=service_state,
+        source_id=workflow_id,
+        event_metadata=event_metadata,
+    )
+
+    return {
+        "status": "ok",
+        "message": "Workflow service state updated",
+        "workflow_id": workflow_id,
+        "client_key": client_key,
+        "service_state": service_state,
+        "event_id": event_id,
+    }
+
+
+# -------------------------------------------------
 # CLIENT ACCOUNT ENDPOINT
 # -------------------------------------------------
 @app.get("/client/account")
@@ -4542,7 +4648,14 @@ def advance_service_state(
     source_id: str = None,
     event_metadata: dict = None,
 ):
-    if service_state not in {
+    """
+    Advance the canonical service lifecycle state for a workflow.
+
+    This helper owns service_state progression and records an immutable
+    service.* operational event for auditability.
+    """
+
+    allowed_service_states = {
         "pending",
         "triaged",
         "awaiting_dispatch",
@@ -4551,14 +4664,20 @@ def advance_service_state(
         "in_progress",
         "resolved",
         "failed",
-    }:
+    }
+
+    if service_state not in allowed_service_states:
         raise ValueError(f"Invalid service_state: {service_state}")
+
+    event_type = f"service.{service_state}"
+
+    validate_operational_event_type(event_type)
 
     event_id = append_workflow_event(
         cur=cur,
         workflow_id=workflow_id,
         client_key=client_key,
-        event_type=f"service.{service_state}",
+        event_type=event_type,
         event_stage="service",
         source_type="workflow",
         source_id=source_id,
@@ -4578,7 +4697,132 @@ def advance_service_state(
         """,
         (
             service_state,
-            f"service.{service_state}",
+            event_type,
+            workflow_id,
+            client_key,
+        ),
+    )
+
+    return event_id
+
+
+def resolve_workflow(
+    cur,
+    workflow_id: str,
+    client_key: str,
+    source_id: str = None,
+    resolution_reason: str = "workflow_completed",
+    event_metadata: dict = None,
+):
+    """
+    Resolve a workflow when the operational lifecycle reaches a successful
+    terminal state.
+
+    This should not be used for simple call completion. It is reserved for
+    actual service/workflow resolution.
+    """
+
+    event_type = "workflow.resolved"
+
+    validate_operational_event_type(event_type)
+    validate_workflow_status("resolved")
+
+    metadata = {
+        "resolution_reason": resolution_reason,
+    }
+
+    if event_metadata:
+        metadata.update(event_metadata)
+
+    event_id = append_workflow_event(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type=event_type,
+        event_stage="resolved",
+        source_type="workflow",
+        source_id=source_id,
+        metadata=metadata,
+    )
+
+    cur.execute(
+        """
+        UPDATE workflow_instances
+        SET
+            workflow_status = 'resolved',
+            service_state = 'resolved',
+            current_stage = 'resolved',
+            last_event_type = %s,
+            last_event_at = NOW(),
+            completed_at = COALESCE(completed_at, NOW()),
+            updated_at = NOW()
+        WHERE workflow_id = %s
+          AND client_key = %s;
+        """,
+        (
+            event_type,
+            workflow_id,
+            client_key,
+        ),
+    )
+
+    return event_id
+
+
+def fail_workflow(
+    cur,
+    workflow_id: str,
+    client_key: str,
+    source_id: str = None,
+    failure_reason: str = "workflow_failed",
+    event_metadata: dict = None,
+):
+    """
+    Fail a workflow when the operational lifecycle reaches an unsuccessful
+    terminal state.
+
+    This should not be used for urgency, escalation, or incomplete intake.
+    """
+
+    event_type = "workflow.failed"
+
+    validate_operational_event_type(event_type)
+    validate_workflow_status("failed")
+
+    metadata = {
+        "failure_reason": failure_reason,
+    }
+
+    if event_metadata:
+        metadata.update(event_metadata)
+
+    event_id = append_workflow_event(
+        cur=cur,
+        workflow_id=workflow_id,
+        client_key=client_key,
+        event_type=event_type,
+        event_stage="failed",
+        source_type="workflow",
+        source_id=source_id,
+        metadata=metadata,
+    )
+
+    cur.execute(
+        """
+        UPDATE workflow_instances
+        SET
+            workflow_status = 'failed',
+            service_state = 'failed',
+            current_stage = 'failed',
+            last_event_type = %s,
+            last_event_at = NOW(),
+            completed_at = COALESCE(completed_at, NOW()),
+            updated_at = NOW()
+        WHERE workflow_id = %s
+          AND client_key = %s;
+        """,
+        (
+            event_type,
             workflow_id,
             client_key,
         ),
@@ -4640,6 +4884,138 @@ def advance_workflow_stage_by_workflow_id(
 
     except Exception:
         logger.exception("Workflow stage advancement failed")
+        return None
+
+
+def advance_service_state_by_workflow_id(
+    workflow_id: str,
+    client_key: str,
+    service_state: str,
+    source_id: str = None,
+    event_metadata: dict = None,
+):
+    """
+    DB-safe service lifecycle advancement helper.
+
+    Opens its own database connection, then delegates to the canonical
+    cursor-scoped advance_service_state() primitive.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        logger.warning("Service state advancement skipped: DATABASE_URL not configured")
+        return None
+
+    if not workflow_id or not client_key or not service_state:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                event_id = advance_service_state(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    client_key=client_key,
+                    service_state=service_state,
+                    source_id=source_id,
+                    event_metadata=event_metadata,
+                )
+
+            conn.commit()
+
+        return event_id
+
+    except Exception:
+        logger.exception("Service state advancement failed")
+        return None
+
+
+def resolve_workflow_by_workflow_id(
+    workflow_id: str,
+    client_key: str,
+    source_id: str = None,
+    resolution_reason: str = "workflow_completed",
+    event_metadata: dict = None,
+):
+    """
+    DB-safe workflow resolution helper.
+
+    Opens its own database connection, then delegates to the canonical
+    cursor-scoped resolve_workflow() primitive.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        logger.warning("Workflow resolution skipped: DATABASE_URL not configured")
+        return None
+
+    if not workflow_id or not client_key:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                event_id = resolve_workflow(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    client_key=client_key,
+                    source_id=source_id,
+                    resolution_reason=resolution_reason,
+                    event_metadata=event_metadata,
+                )
+
+            conn.commit()
+
+        return event_id
+
+    except Exception:
+        logger.exception("Workflow resolution failed")
+        return None
+
+
+def fail_workflow_by_workflow_id(
+    workflow_id: str,
+    client_key: str,
+    source_id: str = None,
+    failure_reason: str = "workflow_failed",
+    event_metadata: dict = None,
+):
+    """
+    DB-safe workflow failure helper.
+
+    Opens its own database connection, then delegates to the canonical
+    cursor-scoped fail_workflow() primitive.
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    if not database_url:
+        logger.warning("Workflow failure skipped: DATABASE_URL not configured")
+        return None
+
+    if not workflow_id or not client_key:
+        return None
+
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                event_id = fail_workflow(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    client_key=client_key,
+                    source_id=source_id,
+                    failure_reason=failure_reason,
+                    event_metadata=event_metadata,
+                )
+
+            conn.commit()
+
+        return event_id
+
+    except Exception:
+        logger.exception("Workflow failure failed")
         return None
 
 
