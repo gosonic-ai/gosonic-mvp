@@ -2548,6 +2548,12 @@ async def update_workflow_service_state(
         event_metadata=event_metadata,
     )
 
+    if not event_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Workflow service state update failed before event persistence",
+        )
+
     return {
         "status": "ok",
         "message": "Workflow service state updated",
