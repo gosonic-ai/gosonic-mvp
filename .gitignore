@@ -9,3 +9,6 @@ database/backups/
 *.tar.gz
 
 .env
+
+__pycache__/
+*.pyc
