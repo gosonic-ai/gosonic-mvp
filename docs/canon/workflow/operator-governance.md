@@ -62,6 +62,45 @@ Every future action should answer:
 - Is the action reversible?
 - Is the action visible to the client?
 
+## Acknowledgement Governance
+
+Acknowledgement governance controls whether service progression is allowed before the business/operator has explicitly acknowledged receipt of the request.
+
+Acknowledgement and service progression remain separate lifecycle dimensions.
+
+### Current Lite Policy
+
+Current Lite behavior allows service progression before acknowledgement.
+
+Reason:
+- operators may receive the request through SMS, phone, dashboard, or internal process
+- acknowledgement confirms receipt but does not necessarily determine operational readiness
+- service progression remains an explicit operator action
+
+### Future Policy Options
+
+Future client or plan-level policies may include:
+
+1. `acknowledgement_optional`
+   - service progression can begin immediately after intake and notification
+
+2. `acknowledgement_required_before_dispatch`
+   - service progression cannot move from `triaged` to `awaiting_dispatch` until acknowledgement is recorded
+
+3. `acknowledgement_required_before_resolution`
+   - workflow may progress operationally, but terminal resolution requires acknowledgement
+
+4. `auto_escalate_if_unacknowledged`
+   - workflow remains active but escalates if acknowledgement is not recorded within a configured SLA window
+
+### Governance Rule Placement
+
+Acknowledgement policy must be enforced in backend action generation before actions are exposed to the frontend.
+
+The frontend must not decide whether acknowledgement is required.
+
+Future enforcement belongs in the backend operator action eligibility layer.
+
 ## Current Implementation Direction
 
 The backend returns `operator_actions` in the `/calls` response.
