@@ -1325,6 +1325,21 @@ def init_db(x_admin_key: str = Header(None)):
                     ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
                 """)
 
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS caller_phone_source TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS caller_identity_status TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE calls
+                    ADD COLUMN IF NOT EXISTS caller_phone_verified BOOLEAN NOT NULL DEFAULT FALSE;
+                """)
+
                 # -------------------------------------------------
                 # CALL EVENTS TABLE
                 # -------------------------------------------------
@@ -2104,6 +2119,9 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                         calls.escalation_reason,
                         calls.transcript,
                         calls.ended_at,
+                        calls.caller_phone_source,
+                        calls.caller_identity_status,
+                        calls.caller_phone_verified,
                         calls.created_at,
                         calls.raw_payload,
                         workflow_instances.workflow_id,
@@ -2132,10 +2150,10 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
             # -------------------------------------------------
             # CANONICAL QUEUE STATE
             # -------------------------------------------------
-            workflow_status = row[28]
-            current_stage = row[29]
-            notification_state = row[32]
-            service_state = row[33]
+            workflow_status = row[31]
+            current_stage = row[32]
+            notification_state = row[35]
+            service_state = row[36]
             urgency = row[7]
 
             queue_state = compute_queue_state(
@@ -2149,13 +2167,13 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                 workflow_status=workflow_status,
                 service_state=service_state,
                 notification_state=notification_state,
-                last_event_type=row[30],
+                last_event_type=row[33],
             )
 
             operator_action_state = build_operator_action_state(
                 workflow_status=workflow_status,
                 service_state=service_state,
-                last_event_type=row[30],
+                last_event_type=row[33],
             )
 
             calls.append(
@@ -2185,16 +2203,19 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "escalation_reason": row[22],
                     "transcript": row[23],
                     "ended_at": row[24].isoformat() if row[24] else None,
-                    "created_at": row[25].isoformat() if row[25] else None,
-                    "raw_payload": row[26],
-                    "workflow_id": row[27],
+                    "caller_phone_source": row[25],
+                    "caller_identity_status": row[26],
+                    "caller_phone_verified": row[27],
+                    "created_at": row[28].isoformat() if row[28] else None,
+                    "raw_payload": row[29],
+                    "workflow_id": row[30],
                     "workflow_status": workflow_status,
                     "queue_state": queue_state,
                     "current_stage": current_stage,
-                    "last_event_type": row[30],
-                    "last_event_at": row[31].isoformat() if row[31] else None,
-                    "notification_state": row[32],
-                    "service_state": row[33],
+                    "last_event_type": row[33],
+                    "last_event_at": row[34].isoformat() if row[34] else None,
+                    "notification_state": row[35],
+                    "service_state": row[36],
                     "operator_actions": operator_actions,
                     "operator_action_state": operator_action_state,
                 }
@@ -4615,6 +4636,9 @@ def save_call_record(
     escalation_reason=None,
     transcript=None,
     ended_at=None,
+    caller_phone_source=None,
+    caller_identity_status=None,
+    caller_phone_verified=False,
 ):
     """
     Persists analyzed call results to PostgreSQL.
@@ -4680,10 +4704,15 @@ def save_call_record(
                         processing_latency_ms,
                         escalation_reason,
                         transcript,
-                        ended_at
+                        ended_at,
+                        caller_phone_source,
+                        caller_identity_status,
+                        caller_phone_verified
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (call_id) DO UPDATE SET
                         caller_name = EXCLUDED.caller_name,
@@ -4709,7 +4738,10 @@ def save_call_record(
                         processing_latency_ms = EXCLUDED.processing_latency_ms,
                         escalation_reason = EXCLUDED.escalation_reason,
                         transcript = EXCLUDED.transcript,
-                        ended_at = EXCLUDED.ended_at;
+                        ended_at = EXCLUDED.ended_at,
+                        caller_phone_source = EXCLUDED.caller_phone_source,
+                        caller_identity_status = EXCLUDED.caller_identity_status,
+                        caller_phone_verified = EXCLUDED.caller_phone_verified;
                 """,
                     (
                         call_id,
@@ -4738,6 +4770,9 @@ def save_call_record(
                         escalation_reason,
                         transcript,
                         ended_at,
+                        caller_phone_source,
+                        caller_identity_status,
+                        caller_phone_verified,
                     ),
                 )
 
@@ -6138,6 +6173,21 @@ async def call_summary(
 
         short_summary = build_short_summary(urgency, issue_type)
 
+        # -------------------------------------------------
+        # CALLER IDENTITY SEMANTICS
+        # -------------------------------------------------
+        caller_phone_source = "unknown"
+        caller_identity_status = "anonymous"
+        caller_phone_verified = False
+
+        if formatted_phone:
+            caller_phone_source = "ani"
+            caller_phone_verified = True
+            caller_identity_status = "partial"
+
+        if caller_name and caller_name != "Unknown" and service_address and service_address != "Unknown":
+            caller_identity_status = "known"
+
         required_fields_present = all(
             [
                 caller_name and caller_name != "Unknown",
@@ -6316,6 +6366,9 @@ async def call_summary(
             escalation_reason=("urgent_call" if urgency == "urgent" else None),
             transcript=full_transcript,
             ended_at=datetime.now(timezone.utc),
+            caller_phone_source=caller_phone_source,
+            caller_identity_status=caller_identity_status,
+            caller_phone_verified=caller_phone_verified,
         )
 
         workflow_id = call_save_result.get("workflow_id")
