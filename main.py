@@ -2725,6 +2725,9 @@ def build_operator_actions(
     if workflow_status in TERMINAL_WORKFLOW_STATUSES:
         return []
 
+    if workflow_status != "active":
+        return []
+
     actions = []
 
     if service_state == "triaged":
