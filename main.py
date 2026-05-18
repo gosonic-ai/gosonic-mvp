@@ -2148,6 +2148,8 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
             operator_actions = build_operator_actions(
                 workflow_status=workflow_status,
                 service_state=service_state,
+                notification_state=notification_state,
+                last_event_type=row[30],
             )
 
             calls.append(
@@ -2709,6 +2711,8 @@ def confirm_operator_acknowledgement(token: str):
 def build_operator_actions(
     workflow_status: str,
     service_state: str,
+    notification_state: str = None,
+    last_event_type: str = None,
 ):
     """
     Backend-authoritative operator action generator.
@@ -2721,6 +2725,10 @@ def build_operator_actions(
 
     workflow_status = (workflow_status or "").strip().lower()
     service_state = normalize_service_state(service_state)
+    notification_state = (notification_state or "").strip().lower()
+    last_event_type = (last_event_type or "").strip().lower()
+
+    acknowledgement_recorded = last_event_type == "operator.acknowledged"
 
     if workflow_status in TERMINAL_WORKFLOW_STATUSES:
         return []
@@ -2736,6 +2744,9 @@ def build_operator_actions(
                 "action_type": "advance_service_state",
                 "label": "Move To Awaiting Dispatch",
                 "target_service_state": "awaiting_dispatch",
+                "requires_acknowledgement": False,
+                "acknowledgement_recorded": acknowledgement_recorded,
+                "governance_policy": "acknowledgement_optional",
             }
         )
 
@@ -2745,6 +2756,9 @@ def build_operator_actions(
                 "action_type": "advance_service_state",
                 "label": "Mark Service Scheduled",
                 "target_service_state": "scheduled",
+                "requires_acknowledgement": False,
+                "acknowledgement_recorded": acknowledgement_recorded,
+                "governance_policy": "acknowledgement_optional",
             }
         )
 
@@ -2754,6 +2768,9 @@ def build_operator_actions(
                 "action_type": "advance_service_state",
                 "label": "Mark Technician Assigned",
                 "target_service_state": "assigned",
+                "requires_acknowledgement": False,
+                "acknowledgement_recorded": acknowledgement_recorded,
+                "governance_policy": "acknowledgement_optional",
             }
         )
 
@@ -2763,6 +2780,9 @@ def build_operator_actions(
                 "action_type": "advance_service_state",
                 "label": "Start Service Work",
                 "target_service_state": "in_progress",
+                "requires_acknowledgement": False,
+                "acknowledgement_recorded": acknowledgement_recorded,
+                "governance_policy": "acknowledgement_optional",
             }
         )
 
@@ -2772,6 +2792,9 @@ def build_operator_actions(
                 "action_type": "advance_service_state",
                 "label": "Resolve Workflow",
                 "target_service_state": "resolved",
+                "requires_acknowledgement": False,
+                "acknowledgement_recorded": acknowledgement_recorded,
+                "governance_policy": "acknowledgement_optional",
             }
         )
 
