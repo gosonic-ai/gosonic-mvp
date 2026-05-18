@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Header, HTTPException, Query
+from fastapi import FastAPI, Request, Header, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from twilio.rest import Client
@@ -2736,6 +2736,29 @@ def confirm_operator_acknowledgement(token: str):
 # -------------------------------------------------
 # OPERATOR ACTIONS
 # -------------------------------------------------
+CANONICAL_OPERATOR_ACTION_TYPE = "service.transition"
+
+
+def build_service_transition_action(
+    action_id: str,
+    label: str,
+    target_service_state: str,
+    requires_acknowledgement: bool,
+    acknowledgement_recorded: bool,
+    governance_policy: str,
+    terminal: bool = False,
+):
+    return {
+        "action_id": action_id,
+        "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+        "label": label,
+        "target_service_state": target_service_state,
+        "requires_acknowledgement": requires_acknowledgement,
+        "acknowledgement_recorded": acknowledgement_recorded,
+        "governance_policy": governance_policy,
+        "terminal": terminal,
+    }
+
 def is_acknowledgement_recorded(last_event_type: str):
     return (last_event_type or "").strip().lower() == "operator.acknowledged"
 
@@ -2774,62 +2797,67 @@ def build_operator_actions(
             return []
 
         actions.append(
-            {
-                "action_type": "advance_service_state",
-                "label": "Move To Awaiting Dispatch",
-                "target_service_state": "awaiting_dispatch",
-                "requires_acknowledgement": True,
-                "acknowledgement_recorded": acknowledgement_recorded,
-                "governance_policy": "acknowledgement_required_before_dispatch",
-            }
+            build_service_transition_action(
+                action_id="advance_to_awaiting_dispatch",
+                label="Move To Awaiting Dispatch",
+                target_service_state="awaiting_dispatch",
+                requires_acknowledgement=True,
+                acknowledgement_recorded=acknowledgement_recorded,
+                governance_policy="acknowledgement_required_before_dispatch",
+                terminal=False,
+            )
         )
 
     elif service_state == "awaiting_dispatch":
         actions.append(
-            {
-                "action_type": "advance_service_state",
-                "label": "Mark Service Scheduled",
-                "target_service_state": "scheduled",
-                "requires_acknowledgement": False,
-                "acknowledgement_recorded": acknowledgement_recorded,
-                "governance_policy": "acknowledgement_optional",
-            }
+            build_service_transition_action(
+                action_id="advance_to_scheduled",
+                label="Schedule Service",
+                target_service_state="scheduled",
+                requires_acknowledgement=False,
+                acknowledgement_recorded=acknowledgement_recorded,
+                governance_policy="standard_service_progression",
+                terminal=False,
+            )
         )
 
     elif service_state == "scheduled":
         actions.append(
-            {
-                "action_type": "advance_service_state",
-                "label": "Mark Technician Assigned",
-                "target_service_state": "assigned",
-                "requires_acknowledgement": False,
-                "acknowledgement_recorded": acknowledgement_recorded,
-                "governance_policy": "acknowledgement_optional",
-            }
+            build_service_transition_action(
+                action_id="advance_to_assigned",
+                label="Assign Technician",
+                target_service_state="assigned",
+                requires_acknowledgement=False,
+                acknowledgement_recorded=acknowledgement_recorded,
+                governance_policy="standard_service_progression",
+                terminal=False,
+            )
         )
 
     elif service_state == "assigned":
         actions.append(
-            {
-                "action_type": "advance_service_state",
-                "label": "Start Service Work",
-                "target_service_state": "in_progress",
-                "requires_acknowledgement": False,
-                "acknowledgement_recorded": acknowledgement_recorded,
-                "governance_policy": "acknowledgement_optional",
-            }
+            build_service_transition_action(
+                action_id="advance_to_in_progress",
+                label="Mark In Progress",
+                target_service_state="in_progress",
+                requires_acknowledgement=False,
+                acknowledgement_recorded=acknowledgement_recorded,
+                governance_policy="standard_service_progression",
+                terminal=False,
+            )
         )
 
     elif service_state == "in_progress":
         actions.append(
-            {
-                "action_type": "advance_service_state",
-                "label": "Resolve Workflow",
-                "target_service_state": "resolved",
-                "requires_acknowledgement": False,
-                "acknowledgement_recorded": acknowledgement_recorded,
-                "governance_policy": "acknowledgement_optional",
-            }
+            build_service_transition_action(
+                action_id="resolve_workflow",
+                label="Resolve Workflow",
+                target_service_state="resolved",
+                requires_acknowledgement=False,
+                acknowledgement_recorded=acknowledgement_recorded,
+                governance_policy="workflow_resolution",
+                terminal=True,
+            )
         )
 
     return actions
@@ -2873,6 +2901,51 @@ def build_operator_action_state(
         "label": None,
         "governance_policy": "standard_lite_service_lifecycle",
     }
+
+# -------------------------------------------------
+# OPERATOR ACTION RESOLUTION
+# -------------------------------------------------
+def resolve_operator_action(action_id: str):
+    """
+    Resolves a canonical operator action_id into the lifecycle transition
+    it is allowed to request.
+
+    This is the bridge between backend-generated action objects and future
+    action execution endpoints. It intentionally does not perform the action.
+    It only resolves canonical action identity into requested lifecycle intent.
+    """
+
+    action_id = (action_id or "").strip().lower()
+
+    action_map = {
+        "advance_to_awaiting_dispatch": {
+            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+            "target_service_state": "awaiting_dispatch",
+            "terminal": False,
+        },
+        "advance_to_scheduled": {
+            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+            "target_service_state": "scheduled",
+            "terminal": False,
+        },
+        "advance_to_assigned": {
+            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+            "target_service_state": "assigned",
+            "terminal": False,
+        },
+        "advance_to_in_progress": {
+            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+            "target_service_state": "in_progress",
+            "terminal": False,
+        },
+        "resolve_workflow": {
+            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+            "target_service_state": "resolved",
+            "terminal": True,
+        },
+    }
+
+    return action_map.get(action_id)
 
 # -------------------------------------------------
 # SERVICE STATE TRANSITION VALIDATION
@@ -2986,6 +3059,72 @@ def validate_service_state_transition(
 # -------------------------------------------------
 # WORKFLOW SERVICE STATE UPDATE ENDPOINT
 # -------------------------------------------------
+@app.post("/workflows/{workflow_id}/actions/{action_id}")
+def execute_operator_action(
+    workflow_id: str,
+    action_id: str,
+    payload: dict = Body(default={}),
+    authorization: str = Header(default=None),
+):
+    """
+    Canonical operator action execution endpoint.
+
+    This endpoint resolves backend-generated canonical action IDs into
+    validated lifecycle transitions.
+
+    Current implementation intentionally delegates to the existing
+    service-state orchestration path so lifecycle validation,
+    immutable event persistence, and workflow semantics remain centralized.
+    """
+
+    require_auth_token(authorization)
+
+    resolved_action = resolve_operator_action(action_id)
+
+    if not resolved_action:
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown operator action",
+        )
+
+    action_type = resolved_action.get("action_type")
+
+    if action_type != CANONICAL_OPERATOR_ACTION_TYPE:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported operator action type",
+        )
+
+    target_service_state = resolved_action.get(
+        "target_service_state"
+    )
+
+    if not target_service_state:
+        raise HTTPException(
+            status_code=400,
+            detail="Operator action missing target service state",
+        )
+
+    requested_by = payload.get(
+        "requested_by",
+        "platform_admin",
+    )
+
+    reason = payload.get(
+        "reason",
+        "canonical operator action",
+    )
+
+    return update_workflow_service_state(
+        workflow_id=workflow_id,
+        payload={
+            "service_state": target_service_state,
+            "requested_by": requested_by,
+            "reason": reason,
+        },
+        authorization=authorization,
+    )
+
 @app.post("/workflows/{workflow_id}/service-state")
 async def update_workflow_service_state(
     workflow_id: str,
