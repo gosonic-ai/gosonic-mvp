@@ -2152,6 +2152,12 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                 last_event_type=row[30],
             )
 
+            operator_action_state = build_operator_action_state(
+                workflow_status=workflow_status,
+                service_state=service_state,
+                last_event_type=row[30],
+            )
+
             calls.append(
                 {
                     "call_id": row[0],
@@ -2190,6 +2196,7 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "notification_state": row[32],
                     "service_state": row[33],
                     "operator_actions": operator_actions,
+                    "operator_action_state": operator_action_state,
                 }
             )
 
@@ -2708,6 +2715,9 @@ def confirm_operator_acknowledgement(token: str):
 # -------------------------------------------------
 # OPERATOR ACTIONS
 # -------------------------------------------------
+def is_acknowledgement_recorded(last_event_type: str):
+    return (last_event_type or "").strip().lower() == "operator.acknowledged"
+
 def build_operator_actions(
     workflow_status: str,
     service_state: str,
@@ -2728,7 +2738,7 @@ def build_operator_actions(
     notification_state = (notification_state or "").strip().lower()
     last_event_type = (last_event_type or "").strip().lower()
 
-    acknowledgement_recorded = last_event_type == "operator.acknowledged"
+    acknowledgement_recorded = is_acknowledgement_recorded(last_event_type)
 
     if workflow_status in TERMINAL_WORKFLOW_STATUSES:
         return []
@@ -2739,14 +2749,17 @@ def build_operator_actions(
     actions = []
 
     if service_state == "triaged":
+        if not acknowledgement_recorded:
+            return []
+
         actions.append(
             {
                 "action_type": "advance_service_state",
                 "label": "Move To Awaiting Dispatch",
                 "target_service_state": "awaiting_dispatch",
-                "requires_acknowledgement": False,
+                "requires_acknowledgement": True,
                 "acknowledgement_recorded": acknowledgement_recorded,
-                "governance_policy": "acknowledgement_optional",
+                "governance_policy": "acknowledgement_required_before_dispatch",
             }
         )
 
@@ -2799,6 +2812,46 @@ def build_operator_actions(
         )
 
     return actions
+
+def build_operator_action_state(
+    workflow_status: str,
+    service_state: str,
+    last_event_type: str = None,
+):
+    workflow_status = (workflow_status or "").strip().lower()
+    service_state = normalize_service_state(service_state)
+    acknowledgement_recorded = is_acknowledgement_recorded(last_event_type)
+
+    if workflow_status in TERMINAL_WORKFLOW_STATUSES:
+        return {
+            "status": "none",
+            "reason": "terminal_workflow",
+            "label": None,
+            "governance_policy": "terminal_workflows_expose_no_actions",
+        }
+
+    if workflow_status != "active":
+        return {
+            "status": "none",
+            "reason": "workflow_not_active",
+            "label": None,
+            "governance_policy": "active_workflows_only",
+        }
+
+    if service_state == "triaged" and not acknowledgement_recorded:
+        return {
+            "status": "blocked",
+            "reason": "awaiting_acknowledgement",
+            "label": "Waiting for operator acknowledgement",
+            "governance_policy": "acknowledgement_required_before_dispatch",
+        }
+
+    return {
+        "status": "available",
+        "reason": None,
+        "label": None,
+        "governance_policy": "standard_lite_service_lifecycle",
+    }
 
 # -------------------------------------------------
 # SERVICE STATE TRANSITION VALIDATION
