@@ -2145,6 +2145,11 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                 service_state=service_state,
             )
 
+            operator_actions = build_operator_actions(
+                workflow_status=workflow_status,
+                service_state=service_state,
+            )
+
             calls.append(
                 {
                     "call_id": row[0],
@@ -2182,6 +2187,7 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "last_event_at": row[31].isoformat() if row[31] else None,
                     "notification_state": row[32],
                     "service_state": row[33],
+                    "operator_actions": operator_actions,
                 }
             )
 
@@ -2696,6 +2702,77 @@ def confirm_operator_acknowledgement(token: str):
             status_code=500,
             detail="Operator acknowledgement confirmation failed",
         )
+
+# -------------------------------------------------
+# OPERATOR ACTIONS
+# -------------------------------------------------
+def build_operator_actions(
+    workflow_status: str,
+    service_state: str,
+):
+    """
+    Backend-authoritative operator action generator.
+
+    Frontend should eventually render these actions directly instead of
+    hardcoding lifecycle semantics in React.
+
+    This helper intentionally exposes only operationally valid next actions.
+    """
+
+    workflow_status = (workflow_status or "").strip().lower()
+    service_state = normalize_service_state(service_state)
+
+    if workflow_status in TERMINAL_WORKFLOW_STATUSES:
+        return []
+
+    actions = []
+
+    if service_state == "triaged":
+        actions.append(
+            {
+                "action_type": "advance_service_state",
+                "label": "Move To Awaiting Dispatch",
+                "target_service_state": "awaiting_dispatch",
+            }
+        )
+
+    elif service_state == "awaiting_dispatch":
+        actions.append(
+            {
+                "action_type": "advance_service_state",
+                "label": "Mark Service Scheduled",
+                "target_service_state": "scheduled",
+            }
+        )
+
+    elif service_state == "scheduled":
+        actions.append(
+            {
+                "action_type": "advance_service_state",
+                "label": "Mark Technician Assigned",
+                "target_service_state": "assigned",
+            }
+        )
+
+    elif service_state == "assigned":
+        actions.append(
+            {
+                "action_type": "advance_service_state",
+                "label": "Start Service Work",
+                "target_service_state": "in_progress",
+            }
+        )
+
+    elif service_state == "in_progress":
+        actions.append(
+            {
+                "action_type": "advance_service_state",
+                "label": "Resolve Workflow",
+                "target_service_state": "resolved",
+            }
+        )
+
+    return actions
 
 # -------------------------------------------------
 # SERVICE STATE TRANSITION VALIDATION
