@@ -5628,12 +5628,31 @@ def advance_service_state(
     ownership_update = (event_metadata or {}).get("ownership_update") or {}
 
     if ownership_update:
-        update_workflow_ownership(
+        ownership_workflow_id = update_workflow_ownership(
             cur=cur,
             workflow_id=workflow_id,
             ownership_state=ownership_update.get("ownership_state"),
             assigned_operator=ownership_update.get("assigned_operator"),
             assigned_team=ownership_update.get("assigned_team"),
+        )
+
+        if not ownership_workflow_id:
+            raise RuntimeError("Workflow ownership update failed")
+
+        append_workflow_event(
+            cur=cur,
+            workflow_id=workflow_id,
+            client_key=client_key,
+            event_type="ownership.assigned",
+            event_stage="ownership",
+            source_type="workflow",
+            source_id=source_id,
+            metadata={
+                "ownership_state": ownership_update.get("ownership_state"),
+                "assigned_operator": ownership_update.get("assigned_operator"),
+                "assigned_team": ownership_update.get("assigned_team"),
+                "source_event_type": event_type,
+            },
         )
 
     return event_id
