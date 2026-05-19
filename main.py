@@ -5448,6 +5448,46 @@ def update_workflow_state(
 
     return row[0] if row else None
 
+def update_workflow_ownership(
+    cur,
+    workflow_id: str,
+    ownership_state: str = None,
+    assigned_operator: str = None,
+    assigned_team: str = None,
+):
+    """
+    Updates workflow ownership snapshot fields.
+
+    Ownership represents operational responsibility for the workflow.
+    The immutable operational event stream remains the audit source of truth.
+    """
+
+    if not workflow_id:
+        return None
+
+    cur.execute(
+        """
+        UPDATE workflow_instances
+        SET
+            ownership_state = COALESCE(%s, ownership_state),
+            assigned_operator = COALESCE(%s, assigned_operator),
+            assigned_team = COALESCE(%s, assigned_team),
+            updated_at = NOW()
+        WHERE workflow_id = %s
+        RETURNING workflow_id;
+        """,
+        (
+            ownership_state,
+            assigned_operator,
+            assigned_team,
+            workflow_id,
+        ),
+    )
+
+    row = cur.fetchone()
+
+    return row[0] if row else None
+
 def advance_workflow_stage(
     cur,
     workflow_id: str,
@@ -5561,16 +5601,11 @@ def advance_service_state(
         metadata=event_metadata or {},
     )
 
-    ownership_update = (event_metadata or {}).get("ownership_update") or {}
-
     cur.execute(
         """
         UPDATE workflow_instances
         SET
             service_state = %s,
-            ownership_state = COALESCE(%s, ownership_state),
-            assigned_operator = COALESCE(%s, assigned_operator),
-            assigned_team = COALESCE(%s, assigned_team),
             last_event_type = %s,
             last_event_at = NOW(),
             updated_at = NOW()
@@ -5579,14 +5614,22 @@ def advance_service_state(
         """,
         (
             service_state,
-            ownership_update.get("ownership_state"),
-            ownership_update.get("assigned_operator"),
-            ownership_update.get("assigned_team"),
             event_type,
             workflow_id,
             client_key,
         ),
     )
+
+    ownership_update = (event_metadata or {}).get("ownership_update") or {}
+
+    if ownership_update:
+        update_workflow_ownership(
+            cur=cur,
+            workflow_id=workflow_id,
+            ownership_state=ownership_update.get("ownership_state"),
+            assigned_operator=ownership_update.get("assigned_operator"),
+            assigned_team=ownership_update.get("assigned_team"),
+        )
 
     return event_id
 
