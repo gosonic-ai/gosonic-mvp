@@ -5644,7 +5644,7 @@ def advance_service_state(
             workflow_id=workflow_id,
             client_key=client_key,
             event_type="ownership.assigned",
-            event_stage="ownership",
+            event_stage="acknowledged",
             source_type="workflow",
             source_id=source_id,
             metadata={
