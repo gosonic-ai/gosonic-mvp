@@ -3110,6 +3110,15 @@ def execute_workflow_service_state_update(
         requested_service_state=service_state,
     )
 
+    ownership_update = None
+
+    if service_state == "assigned":
+        ownership_update = {
+            "ownership_state": "operator_assigned",
+            "assigned_operator": requested_by or payload.get("email") or "platform_admin",
+            "assigned_team": "operations",
+        }
+
     event_metadata = {
         "reason": reason,
         "actor": "platform_admin",
@@ -3117,6 +3126,7 @@ def execute_workflow_service_state_update(
         "requested_by": requested_by or payload.get("email"),
         "previous_workflow_status": workflow_snapshot.get("workflow_status"),
         "previous_service_state": workflow_snapshot.get("service_state"),
+        "ownership_update": ownership_update,
     }
 
     if service_state == "resolved":
@@ -5551,19 +5561,27 @@ def advance_service_state(
         metadata=event_metadata or {},
     )
 
+    ownership_update = (event_metadata or {}).get("ownership_update") or {}
+
     cur.execute(
         """
         UPDATE workflow_instances
         SET
             service_state = %s,
+            ownership_state = COALESCE(%s, ownership_state),
+            assigned_operator = COALESCE(%s, assigned_operator),
+            assigned_team = COALESCE(%s, assigned_team),
             last_event_type = %s,
             last_event_at = NOW(),
             updated_at = NOW()
         WHERE workflow_id = %s
-          AND client_key = %s;
+            AND client_key = %s;
         """,
         (
             service_state,
+            ownership_update.get("ownership_state"),
+            ownership_update.get("assigned_operator"),
+            ownership_update.get("assigned_team"),
             event_type,
             workflow_id,
             client_key,
