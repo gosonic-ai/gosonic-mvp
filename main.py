@@ -5167,6 +5167,11 @@ OPERATIONAL_EVENT_TYPES = {
 
     "operator.acknowledged",
 
+    "ownership.assigned",
+    "ownership.reassigned",
+    "ownership.released",
+    "ownership.escalated",
+
     "escalation.required",
     "escalation.created",
     "escalation.notified",
