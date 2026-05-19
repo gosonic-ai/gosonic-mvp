@@ -2738,6 +2738,44 @@ def confirm_operator_acknowledgement(token: str):
 # -------------------------------------------------
 CANONICAL_OPERATOR_ACTION_TYPE = "service.transition"
 
+CANONICAL_OPERATOR_ACTIONS = {
+    "advance_to_awaiting_dispatch": {
+        "label": "Move To Awaiting Dispatch",
+        "target_service_state": "awaiting_dispatch",
+        "requires_acknowledgement": True,
+        "governance_policy": "acknowledgement_required_before_dispatch",
+        "terminal": False,
+    },
+    "advance_to_scheduled": {
+        "label": "Schedule Service",
+        "target_service_state": "scheduled",
+        "requires_acknowledgement": False,
+        "governance_policy": "standard_service_progression",
+        "terminal": False,
+    },
+    "advance_to_assigned": {
+        "label": "Assign Technician",
+        "target_service_state": "assigned",
+        "requires_acknowledgement": False,
+        "governance_policy": "standard_service_progression",
+        "terminal": False,
+    },
+    "advance_to_in_progress": {
+        "label": "Mark In Progress",
+        "target_service_state": "in_progress",
+        "requires_acknowledgement": False,
+        "governance_policy": "standard_service_progression",
+        "terminal": False,
+    },
+    "resolve_workflow": {
+        "label": "Resolve Workflow",
+        "target_service_state": "resolved",
+        "requires_acknowledgement": False,
+        "governance_policy": "workflow_resolution",
+        "terminal": True,
+    },
+}
+
 
 def build_service_transition_action(
     action_id: str,
@@ -2758,6 +2796,25 @@ def build_service_transition_action(
         "governance_policy": governance_policy,
         "terminal": terminal,
     }
+
+def build_canonical_operator_action(
+    action_id: str,
+    acknowledgement_recorded: bool,
+):
+    action = CANONICAL_OPERATOR_ACTIONS.get(action_id)
+
+    if not action:
+        return None
+
+    return build_service_transition_action(
+        action_id=action_id,
+        label=action["label"],
+        target_service_state=action["target_service_state"],
+        requires_acknowledgement=action["requires_acknowledgement"],
+        acknowledgement_recorded=acknowledgement_recorded,
+        governance_policy=action["governance_policy"],
+        terminal=action["terminal"],
+    )
 
 def is_acknowledgement_recorded(last_event_type: str):
     return (last_event_type or "").strip().lower() == "operator.acknowledged"
@@ -2797,66 +2854,41 @@ def build_operator_actions(
             return []
 
         actions.append(
-            build_service_transition_action(
+            build_canonical_operator_action(
                 action_id="advance_to_awaiting_dispatch",
-                label="Move To Awaiting Dispatch",
-                target_service_state="awaiting_dispatch",
-                requires_acknowledgement=True,
                 acknowledgement_recorded=acknowledgement_recorded,
-                governance_policy="acknowledgement_required_before_dispatch",
-                terminal=False,
             )
         )
 
     elif service_state == "awaiting_dispatch":
         actions.append(
-            build_service_transition_action(
+            build_canonical_operator_action(
                 action_id="advance_to_scheduled",
-                label="Schedule Service",
-                target_service_state="scheduled",
-                requires_acknowledgement=False,
                 acknowledgement_recorded=acknowledgement_recorded,
-                governance_policy="standard_service_progression",
-                terminal=False,
             )
         )
 
     elif service_state == "scheduled":
         actions.append(
-            build_service_transition_action(
+            build_canonical_operator_action(
                 action_id="advance_to_assigned",
-                label="Assign Technician",
-                target_service_state="assigned",
-                requires_acknowledgement=False,
                 acknowledgement_recorded=acknowledgement_recorded,
-                governance_policy="standard_service_progression",
-                terminal=False,
             )
         )
 
     elif service_state == "assigned":
         actions.append(
-            build_service_transition_action(
+            build_canonical_operator_action(
                 action_id="advance_to_in_progress",
-                label="Mark In Progress",
-                target_service_state="in_progress",
-                requires_acknowledgement=False,
                 acknowledgement_recorded=acknowledgement_recorded,
-                governance_policy="standard_service_progression",
-                terminal=False,
             )
         )
 
     elif service_state == "in_progress":
         actions.append(
-            build_service_transition_action(
+            build_canonical_operator_action(
                 action_id="resolve_workflow",
-                label="Resolve Workflow",
-                target_service_state="resolved",
-                requires_acknowledgement=False,
                 acknowledgement_recorded=acknowledgement_recorded,
-                governance_policy="workflow_resolution",
-                terminal=True,
             )
         )
 
@@ -2917,35 +2949,16 @@ def resolve_operator_action(action_id: str):
 
     action_id = (action_id or "").strip().lower()
 
-    action_map = {
-        "advance_to_awaiting_dispatch": {
-            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
-            "target_service_state": "awaiting_dispatch",
-            "terminal": False,
-        },
-        "advance_to_scheduled": {
-            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
-            "target_service_state": "scheduled",
-            "terminal": False,
-        },
-        "advance_to_assigned": {
-            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
-            "target_service_state": "assigned",
-            "terminal": False,
-        },
-        "advance_to_in_progress": {
-            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
-            "target_service_state": "in_progress",
-            "terminal": False,
-        },
-        "resolve_workflow": {
-            "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
-            "target_service_state": "resolved",
-            "terminal": True,
-        },
-    }
+    action = CANONICAL_OPERATOR_ACTIONS.get(action_id)
 
-    return action_map.get(action_id)
+    if not action:
+        return None
+
+    return {
+        "action_type": CANONICAL_OPERATOR_ACTION_TYPE,
+        "target_service_state": action["target_service_state"],
+        "terminal": action["terminal"],
+    }
 
 # -------------------------------------------------
 # SERVICE STATE TRANSITION VALIDATION
