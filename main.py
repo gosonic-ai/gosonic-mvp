@@ -3129,7 +3129,7 @@ def execute_workflow_service_state_update(
 
     if service_state == "assigned":
         ownership_update = {
-            "ownership_state": "operator_assigned",
+            "ownership_state": "assigned",
             "assigned_operator": requested_by or payload.get("email") or "platform_admin",
             "assigned_team": "operations",
         }
@@ -5659,7 +5659,7 @@ def advance_service_state(
             workflow_id=workflow_id,
             client_key=client_key,
             event_type="ownership.assigned",
-            event_stage="acknowledged",
+            event_stage="assigned",
             source_type="workflow",
             source_id=source_id,
             metadata={
