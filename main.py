@@ -3115,14 +3115,9 @@ def execute_operator_action(
         "canonical operator action",
     )
 
-    return update_workflow_service_state(
-        workflow_id=workflow_id,
-        payload={
-            "service_state": target_service_state,
-            "requested_by": requested_by,
-            "reason": reason,
-        },
-        authorization=authorization,
+    raise HTTPException(
+        status_code=501,
+        detail="Operator action execution is not wired yet",
     )
 
 @app.post("/workflows/{workflow_id}/service-state")
