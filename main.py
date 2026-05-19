@@ -5614,15 +5614,17 @@ def advance_service_state(
         raise ValueError(f"Invalid service_state: {service_state}")
 
     event_type = f"service.{service_state}"
+    event_stage = service_state
 
     validate_operational_event_type(event_type)
+    validate_workflow_stage(event_stage)
 
     event_id = append_workflow_event(
         cur=cur,
         workflow_id=workflow_id,
         client_key=client_key,
         event_type=event_type,
-        event_stage="service",
+        event_stage=event_stage,
         source_type="workflow",
         source_id=source_id,
         metadata=event_metadata or {},
@@ -5633,6 +5635,7 @@ def advance_service_state(
         UPDATE workflow_instances
         SET
             service_state = %s,
+            current_stage = %s,
             last_event_type = %s,
             last_event_at = NOW(),
             updated_at = NOW()
@@ -5641,6 +5644,7 @@ def advance_service_state(
         """,
         (
             service_state,
+            event_stage,
             event_type,
             workflow_id,
             client_key,
