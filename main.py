@@ -1427,6 +1427,21 @@ def init_db(x_admin_key: str = Header(None)):
                 """)
 
                 cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS ownership_state TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS assigned_operator TEXT;
+                """)
+
+                cur.execute("""
+                    ALTER TABLE workflow_instances
+                    ADD COLUMN IF NOT EXISTS assigned_team TEXT;
+                """)
+
+                cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_workflow_instances_client_key
                     ON workflow_instances(client_key);
                 """)
@@ -2130,7 +2145,10 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                         workflow_instances.last_event_type,
                         workflow_instances.last_event_at,
                         workflow_instances.notification_state,
-                        workflow_instances.service_state
+                        workflow_instances.service_state,
+                        workflow_instances.ownership_state,
+                        workflow_instances.assigned_operator,
+                        workflow_instances.assigned_team
                     FROM calls
                     LEFT JOIN workflow_instances
                     ON workflow_instances.source_type = 'call'
@@ -2154,6 +2172,9 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
             current_stage = row[32]
             notification_state = row[35]
             service_state = row[36]
+            ownership_state = row[37]
+            assigned_operator = row[38]
+            assigned_team = row[39]
             urgency = row[7]
 
             queue_state = compute_queue_state(
@@ -2216,6 +2237,9 @@ def get_calls(client_key: str = Query(None), authorization: str = Header(None)):
                     "last_event_at": row[34].isoformat() if row[34] else None,
                     "notification_state": row[35],
                     "service_state": row[36],
+                    "ownership_state": ownership_state,
+                    "assigned_operator": assigned_operator,
+                    "assigned_team": assigned_team,
                     "operator_actions": operator_actions,
                     "operator_action_state": operator_action_state,
                 }
