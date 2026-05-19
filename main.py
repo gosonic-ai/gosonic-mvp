@@ -2698,13 +2698,14 @@ def confirm_operator_acknowledgement(token: str):
                     cur=cur,
                     workflow_id=workflow_id,
                     client_key=client_key,
-                    event_type="operator.acknowledged",
-                    event_stage="notification_sent",
+                    event_type="ownership.acknowledged",
+                    event_stage="acknowledged",
                     source_type="operator",
                     source_id=workflow_id,
                     metadata={
                         "action_type": action_type,
                         "action_source": "sms_link_button",
+                        "ownership_state": "acknowledged",
                     },
                 )
 
@@ -2714,22 +2715,36 @@ def confirm_operator_acknowledgement(token: str):
                         detail="Operator acknowledgement failed before event persistence",
                     )
 
-                update_workflow_state(
-                    cur=cur,
-                    workflow_id=workflow_id,
-                    workflow_status="active",
-                    current_stage="notification_sent",
-                    last_event_type="operator.acknowledged",
-                )
+            update_workflow_state(
+                cur=cur,
+                workflow_id=workflow_id,
+                workflow_status="active",
+                current_stage="acknowledged",
+                last_event_type="ownership.acknowledged",
+            )
 
-                cur.execute(
-                    """
-                    UPDATE operator_action_tokens
-                    SET used_at = NOW()
-                    WHERE id = %s;
-                    """,
-                    (token_id,),
-                )
+            cur.execute(
+                """
+                UPDATE workflow_instances
+                SET
+                    ownership_state = %s,
+                    updated_at = NOW()
+                WHERE workflow_id = %s;
+                """,
+                (
+                    "acknowledged",
+                    workflow_id,
+                ),
+            )
+
+            cur.execute(
+                """
+                UPDATE operator_action_tokens
+                SET used_at = NOW()
+                WHERE id = %s;
+                """,
+                (token_id,),
+            )
 
             conn.commit()
 
