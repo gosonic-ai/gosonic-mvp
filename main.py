@@ -2849,48 +2849,30 @@ def build_operator_actions(
 
     actions = []
 
-    if service_state == "triaged":
-        if not acknowledgement_recorded:
-            return []
+    action_id = SERVICE_STATE_ACTION_MAP.get(service_state)
 
-        actions.append(
-            build_canonical_operator_action(
-                action_id="advance_to_awaiting_dispatch",
-                acknowledgement_recorded=acknowledgement_recorded,
-            )
-        )
+    if not action_id:
+        return actions
 
-    elif service_state == "awaiting_dispatch":
-        actions.append(
-            build_canonical_operator_action(
-                action_id="advance_to_scheduled",
-                acknowledgement_recorded=acknowledgement_recorded,
-            )
-        )
+    action_definition = CANONICAL_OPERATOR_ACTIONS.get(action_id)
 
-    elif service_state == "scheduled":
-        actions.append(
-            build_canonical_operator_action(
-                action_id="advance_to_assigned",
-                acknowledgement_recorded=acknowledgement_recorded,
-            )
-        )
+    if not action_definition:
+        return actions
 
-    elif service_state == "assigned":
-        actions.append(
-            build_canonical_operator_action(
-                action_id="advance_to_in_progress",
-                acknowledgement_recorded=acknowledgement_recorded,
-            )
-        )
+    requires_acknowledgement = action_definition.get(
+        "requires_acknowledgement",
+        False,
+    )
 
-    elif service_state == "in_progress":
-        actions.append(
-            build_canonical_operator_action(
-                action_id="resolve_workflow",
-                acknowledgement_recorded=acknowledgement_recorded,
-            )
+    if requires_acknowledgement and not acknowledgement_recorded:
+        return actions
+
+    actions.append(
+        build_canonical_operator_action(
+            action_id=action_id,
+            acknowledgement_recorded=acknowledgement_recorded,
         )
+    )
 
     return actions
 
@@ -2975,6 +2957,14 @@ SERVICE_STATE_TRANSITIONS = {
 
 TERMINAL_WORKFLOW_STATUSES = {"resolved", "failed"}
 TERMINAL_SERVICE_STATES = {"resolved", "failed"}
+
+SERVICE_STATE_ACTION_MAP = {
+    "triaged": "advance_to_awaiting_dispatch",
+    "awaiting_dispatch": "advance_to_scheduled",
+    "scheduled": "advance_to_assigned",
+    "assigned": "advance_to_in_progress",
+    "in_progress": "resolve_workflow",
+}
 
 
 def normalize_service_state(value):
