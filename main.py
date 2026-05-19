@@ -2715,36 +2715,36 @@ def confirm_operator_acknowledgement(token: str):
                         detail="Operator acknowledgement failed before event persistence",
                     )
 
-            update_workflow_state(
-                cur=cur,
-                workflow_id=workflow_id,
-                workflow_status="active",
-                current_stage="acknowledged",
-                last_event_type="ownership.acknowledged",
-            )
+                update_workflow_state(
+                    cur=cur,
+                    workflow_id=workflow_id,
+                    workflow_status="active",
+                    current_stage="acknowledged",
+                    last_event_type="ownership.acknowledged",
+                )
 
-            cur.execute(
-                """
-                UPDATE workflow_instances
-                SET
-                    ownership_state = %s,
-                    updated_at = NOW()
-                WHERE workflow_id = %s;
-                """,
-                (
-                    "acknowledged",
-                    workflow_id,
-                ),
-            )
+                cur.execute(
+                    """
+                    UPDATE workflow_instances
+                    SET
+                        ownership_state = %s,
+                        updated_at = NOW()
+                    WHERE workflow_id = %s;
+                    """,
+                    (
+                        "acknowledged",
+                        workflow_id,
+                    ),
+                )
 
-            cur.execute(
-                """
-                UPDATE operator_action_tokens
-                SET used_at = NOW()
-                WHERE id = %s;
-                """,
-                (token_id,),
-            )
+                cur.execute(
+                    """
+                    UPDATE operator_action_tokens
+                    SET used_at = NOW()
+                    WHERE id = %s;
+                    """,
+                    (token_id,),
+                )
 
             conn.commit()
 
