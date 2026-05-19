@@ -2856,7 +2856,10 @@ def build_canonical_operator_action(
     )
 
 def is_acknowledgement_recorded(last_event_type: str):
-    return (last_event_type or "").strip().lower() == "operator.acknowledged"
+    return (last_event_type or "").strip().lower() in {
+        "ownership.acknowledged",
+        "operator.acknowledged",
+    }
 
 def build_operator_actions(
     workflow_status: str,
@@ -5182,6 +5185,7 @@ OPERATIONAL_EVENT_TYPES = {
 
     "operator.acknowledged",
 
+    "ownership.acknowledged",
     "ownership.assigned",
     "ownership.reassigned",
     "ownership.released",
