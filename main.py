@@ -3056,109 +3056,18 @@ def validate_service_state_transition(
     return True
 
 
-# -------------------------------------------------
-# WORKFLOW SERVICE STATE UPDATE ENDPOINT
-# -------------------------------------------------
-@app.post("/workflows/{workflow_id}/actions/{action_id}")
-def execute_operator_action(
+def execute_workflow_service_state_update(
     workflow_id: str,
-    action_id: str,
-    payload: dict = Body(default={}),
-    authorization: str = Header(default=None),
-):
-    """
-    Canonical operator action execution endpoint.
-
-    This endpoint resolves backend-generated canonical action IDs into
-    validated lifecycle transitions.
-
-    Current implementation intentionally delegates to the existing
-    service-state orchestration path so lifecycle validation,
-    immutable event persistence, and workflow semantics remain centralized.
-    """
-
-    require_auth_token(authorization)
-
-    resolved_action = resolve_operator_action(action_id)
-
-    if not resolved_action:
-        raise HTTPException(
-            status_code=404,
-            detail="Unknown operator action",
-        )
-
-    action_type = resolved_action.get("action_type")
-
-    if action_type != CANONICAL_OPERATOR_ACTION_TYPE:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported operator action type",
-        )
-
-    target_service_state = resolved_action.get(
-        "target_service_state"
-    )
-
-    if not target_service_state:
-        raise HTTPException(
-            status_code=400,
-            detail="Operator action missing target service state",
-        )
-
-    requested_by = payload.get(
-        "requested_by",
-        "platform_admin",
-    )
-
-    reason = payload.get(
-        "reason",
-        "canonical operator action",
-    )
-
-    raise HTTPException(
-        status_code=501,
-        detail="Operator action execution is not wired yet",
-    )
-
-@app.post("/workflows/{workflow_id}/service-state")
-async def update_workflow_service_state(
-    workflow_id: str,
-    request: Request,
-    authorization: str = Header(None),
+    client_key: str,
+    service_state: str,
+    reason: str,
+    requested_by: str,
+    authorization: str,
 ):
     payload = require_auth_token(authorization)
 
     if not is_platform_admin(payload):
         raise HTTPException(status_code=403, detail="Platform admin access required")
-
-    data = await request.json()
-
-    client_key = (data.get("client_key") or "").strip()
-    service_state = (data.get("service_state") or "").strip()
-    reason = (data.get("reason") or "manual_admin_update").strip()
-
-    if not workflow_id:
-        raise HTTPException(status_code=400, detail="workflow_id is required")
-
-    if not client_key:
-        raise HTTPException(status_code=400, detail="client_key is required")
-
-    if not service_state:
-        raise HTTPException(status_code=400, detail="service_state is required")
-
-    allowed_service_states = {
-        "pending",
-        "triaged",
-        "awaiting_dispatch",
-        "scheduled",
-        "assigned",
-        "in_progress",
-        "resolved",
-        "failed",
-    }
-
-    if service_state not in allowed_service_states:
-        raise HTTPException(status_code=400, detail="invalid service_state")
 
     workflow_snapshot = get_workflow_state_for_transition(
         workflow_id=workflow_id,
@@ -3177,8 +3086,8 @@ async def update_workflow_service_state(
     event_metadata = {
         "reason": reason,
         "actor": "platform_admin",
-        "source": "manual_admin_endpoint",
-        "requested_by": payload.get("email"),
+        "source": "operator_action",
+        "requested_by": requested_by or payload.get("email"),
         "previous_workflow_status": workflow_snapshot.get("workflow_status"),
         "previous_service_state": workflow_snapshot.get("service_state"),
     }
@@ -3255,6 +3164,129 @@ async def update_workflow_service_state(
         "service_state": service_state,
         "event_id": event_id,
     }
+
+
+# -------------------------------------------------
+# WORKFLOW SERVICE STATE UPDATE ENDPOINT
+# -------------------------------------------------
+@app.post("/workflows/{workflow_id}/actions/{action_id}")
+def execute_operator_action(
+    workflow_id: str,
+    action_id: str,
+    payload: dict = Body(default={}),
+    authorization: str = Header(default=None),
+):
+    """
+    Canonical operator action execution endpoint.
+
+    This endpoint resolves backend-generated canonical action IDs into
+    validated lifecycle transitions.
+
+    Current implementation intentionally delegates to the existing
+    service-state orchestration path so lifecycle validation,
+    immutable event persistence, and workflow semantics remain centralized.
+    """
+
+    require_auth_token(authorization)
+
+    resolved_action = resolve_operator_action(action_id)
+
+    if not resolved_action:
+        raise HTTPException(
+            status_code=404,
+            detail="Unknown operator action",
+        )
+
+    action_type = resolved_action.get("action_type")
+
+    if action_type != CANONICAL_OPERATOR_ACTION_TYPE:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported operator action type",
+        )
+
+    target_service_state = resolved_action.get(
+        "target_service_state"
+    )
+
+    if not target_service_state:
+        raise HTTPException(
+            status_code=400,
+            detail="Operator action missing target service state",
+        )
+
+    requested_by = payload.get(
+        "requested_by",
+        "platform_admin",
+    )
+
+    reason = payload.get(
+        "reason",
+        "canonical operator action",
+    )
+
+    client_key = (payload.get("client_key") or "").strip()
+
+    if not client_key:
+        raise HTTPException(status_code=400, detail="client_key is required")
+
+    return execute_workflow_service_state_update(
+        workflow_id=workflow_id,
+        client_key=client_key,
+        service_state=target_service_state,
+        reason=reason,
+        requested_by=requested_by,
+        authorization=authorization,
+    )
+
+@app.post("/workflows/{workflow_id}/service-state")
+async def update_workflow_service_state(
+    workflow_id: str,
+    request: Request,
+    authorization: str = Header(None),
+):
+    payload = require_auth_token(authorization)
+
+    if not is_platform_admin(payload):
+        raise HTTPException(status_code=403, detail="Platform admin access required")
+
+    data = await request.json()
+
+    client_key = (data.get("client_key") or "").strip()
+    service_state = (data.get("service_state") or "").strip()
+    reason = (data.get("reason") or "manual_admin_update").strip()
+
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+
+    if not client_key:
+        raise HTTPException(status_code=400, detail="client_key is required")
+
+    if not service_state:
+        raise HTTPException(status_code=400, detail="service_state is required")
+
+    allowed_service_states = {
+        "pending",
+        "triaged",
+        "awaiting_dispatch",
+        "scheduled",
+        "assigned",
+        "in_progress",
+        "resolved",
+        "failed",
+    }
+
+    if service_state not in allowed_service_states:
+        raise HTTPException(status_code=400, detail="invalid service_state")
+
+    return execute_workflow_service_state_update(
+        workflow_id=workflow_id,
+        client_key=client_key,
+        service_state=service_state,
+        reason=reason,
+        requested_by=payload.get("email"),
+        authorization=authorization,
+    )
 
 
 # -------------------------------------------------
